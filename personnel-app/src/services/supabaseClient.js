@@ -794,6 +794,34 @@ export async function fetchOngoingTripForBus(plateNumber) {
   }
 }
 
+export async function publishCurrentBusLocation(busId, position) {
+  try {
+    const latitude = Number(position.latitude);
+    const longitude = Number(position.longitude);
+    if (!busId || !Number.isFinite(latitude) || latitude < -90 || latitude > 90
+      || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      throw new Error('A valid bus and GPS position are required to publish live location.');
+    }
+
+    const speed = position.speed == null ? null : Number(position.speed);
+    const heading = position.heading == null ? null : Number(position.heading);
+    const accuracy = position.accuracy == null ? null : Number(position.accuracy);
+    const { error } = await supabase.from('bus_current_location').upsert({
+      bus_id: busId,
+      latitude,
+      longitude,
+      speed: Number.isFinite(speed) && speed >= 0 ? speed : null,
+      heading: Number.isFinite(heading) && heading >= 0 && heading <= 360 ? heading : null,
+      accuracy: Number.isFinite(accuracy) && accuracy >= 0 ? accuracy : null,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'bus_id' });
+    if (error) throw error;
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
 export async function createManualPassengerJourney({ passengerName, origin, destination, tripId }) {
   try {
     const { data, error } = await supabase

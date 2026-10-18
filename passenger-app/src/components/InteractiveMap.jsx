@@ -210,24 +210,13 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
       const liveBusIcon = L.divIcon({
         className: 'custom-bus-marker',
         html: `
-          <div style="
-            width: 36px;
-            height: 36px;
-            background: ${busIconColor};
-            border: 3px solid #ffffff;
-            border-radius: 50%;
-            box-shadow: 0 0 16px ${isSignalLost ? 'rgba(239, 68, 68, 0.8)' : 'rgba(16, 185, 129, 0.9)'};
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-size: 15px;
-          ">
-            🚌
-          </div>
+          <span class="live-bus-position" style="--bus-position-color: ${busIconColor}">
+            <span class="live-bus-position-pulse"></span>
+            <span class="live-bus-position-dot"></span>
+          </span>
         `,
-        iconSize: [36, 36],
-        iconAnchor: [18, 18]
+        iconSize: [30, 30],
+        iconAnchor: [15, 15]
       });
 
       const busMarker = L.marker([busPos.lat, busPos.lng], { icon: liveBusIcon }).addTo(layerGroup);

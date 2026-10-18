@@ -61,23 +61,29 @@ export function createPassengerQrPayload({
   category = 'Regular',
   boardingStop = '',
   destinationStop = '',
-  busPlate = ''
+  busPlate = '',
+  companions = 0
 }) {
   const now = new Date();
   const mm = String(now.getMonth() + 1).padStart(2, '0');
   const dd = String(now.getDate()).padStart(2, '0');
   const yy = String(now.getFullYear()).slice(-2);
-  const datePrefix = `${mm}${dd}${yy}`;
 
   const resolvedTripId = tripId && /^\d{6}-\d{5}$/.test(tripId)
     ? tripId
     : generateDailyTripId();
 
+  const companionsCount = Number(companions) >= 0 ? Number(companions) : Math.max(0, (Number(count) || 1) - 1);
+  const totalPax = Math.max(1, Number(count) || (companionsCount + 1));
+
   const payload = {
     tripId: resolvedTripId,
-    count: Math.max(1, Number(count) || 1),
+    passengerCategory: category || 'Regular',
     category: category || 'Regular',
     isPriority: isPriorityCategory(category),
+    companions: companionsCount,
+    count: totalPax,
+    totalPassengers: totalPax,
     boardingStop: String(boardingStop || '').trim(),
     destinationStop: String(destinationStop || '').trim(),
     busPlate: String(busPlate || '').trim(),
@@ -100,7 +106,8 @@ export function parsePassengerQRCode(raw) {
     const data = JSON.parse(str);
     if (data && (data.tripId || data.passId || data.id)) {
       const tripId = data.tripId || data.passId || data.id;
-      const count = Number(data.count || data.passengerCount || 1);
+      const count = Number(data.count || data.passengerCount || data.totalPassengers || 1);
+      const companions = Number(data.companions != null ? data.companions : (count > 1 ? count - 1 : 0));
       const category = data.category || data.passengerCategory || 'Regular';
       const boardingStop = data.boardingStop || data.origin || '';
       const destinationStop = data.destinationStop || data.destination || '';
@@ -108,6 +115,7 @@ export function parsePassengerQRCode(raw) {
       return {
         tripId,
         count: isNaN(count) || count < 1 ? 1 : count,
+        companions: isNaN(companions) || companions < 0 ? 0 : companions,
         category,
         isPriority: isPriorityCategory(category),
         boardingStop,

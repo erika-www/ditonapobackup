@@ -26,40 +26,16 @@ export async function drawQRCodeCanvas(
   passId = null
 ) {
   if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
 
-  const width = 360;
-  const height = 490;
-  canvas.width = width;
-  canvas.height = height;
-
-  // White Background
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, width, height);
-
-  // Header Bar
-  ctx.fillStyle = '#0284c7';
-  ctx.fillRect(0, 0, width, 52);
-
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 15px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('QUEZON CITY BUS SYSTEM', width / 2, 32);
-
-  // Subheader
-  ctx.fillStyle = '#0f172a';
-  ctx.font = 'bold 12px sans-serif';
-  ctx.fillText('OFFICIAL DIGITAL BOARDING PASS', width / 2, 74);
-
-  const totalPax = 1 + (Number(companionsCount) || 0);
-  const companionText = companionsCount > 0 ? `1 + ${companionsCount} companion(s)` : 'Solo Passenger';
+  const companions = Number(companionsCount) || 0;
+  const totalPax = 1 + companions;
   const resolvedTripId = passId || (typeof dataString === 'string' && /^\d{6}-\d{5}$/.test(dataString) ? dataString : (dataString ? dataString.slice(0, 16) : 'PASS-00001'));
 
   // Build the clean, standardized JSON QR payload that any scanner can parse
   const qrPayload = createPassengerQrPayload({
     tripId: resolvedTripId,
     count: totalPax,
+    companions: companions,
     category: category || 'Regular',
     boardingStop: fromStop,
     destinationStop: toStop,
@@ -67,56 +43,16 @@ export async function drawQRCodeCanvas(
   });
 
   try {
-    // Generate real enlarged QR code matrix (250x250) onto temporary canvas
-    const qrTempCanvas = document.createElement('canvas');
-    await QRCode.toCanvas(qrTempCanvas, qrPayload, {
-      width: 250,
+    // Generate crisp QR code matrix onto the canvas matching Image 2 layout
+    await QRCode.toCanvas(canvas, qrPayload, {
+      width: 240,
       margin: 1,
       errorCorrectionLevel: 'M',
       color: {
-        dark: '#0f172a',
+        dark: '#000000',
         light: '#ffffff',
       },
     });
-
-    const qrStartX = (width - 250) / 2;
-    const qrStartY = 86;
-    ctx.drawImage(qrTempCanvas, qrStartX, qrStartY);
-
-    // Border around QR Code
-    ctx.strokeStyle = '#0284c7';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(qrStartX - 4, qrStartY - 4, 258, 258);
-
-    // Bottom Ticket Details Box
-    const boxY = qrStartY + 268;
-    ctx.fillStyle = '#f8fafc';
-    ctx.fillRect(16, boxY, width - 32, 118);
-    ctx.strokeStyle = '#e2e8f0';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(16, boxY, width - 32, 118);
-
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#0f172a';
-    ctx.font = 'bold 12px sans-serif';
-    ctx.fillText(`Pass ID: ${resolvedTripId}`, 26, boxY + 22);
-
-    const isPri = isPriorityCategory(category);
-    ctx.fillStyle = isPri ? '#b45309' : '#0369a1';
-    ctx.font = 'bold 11px sans-serif';
-    ctx.fillText(`Category: ${category} (${isPri ? 'Priority Seat /20' : 'Regular Seat /30'})`, 26, boxY + 42);
-
-    ctx.fillStyle = '#334155';
-    ctx.font = '11px sans-serif';
-    const fromTrunc = fromStop.length > 36 ? fromStop.slice(0, 34) + '…' : fromStop;
-    const toTrunc = toStop.length > 36 ? toStop.slice(0, 34) + '…' : toStop;
-    ctx.fillText(`From: ${fromTrunc}`, 26, boxY + 62);
-    ctx.fillText(`To: ${toTrunc}`, 26, boxY + 80);
-
-    ctx.fillStyle = '#16a34a';
-    ctx.font = 'bold 11px sans-serif';
-    ctx.fillText(`✓ ${companionText} · Valid Single Entry`, 26, boxY + 102);
-
   } catch (err) {
     console.error('Failed to generate QR code canvas:', err);
   }

@@ -15,7 +15,8 @@ import {
   fetchPassengerRegistry,
   createManualPassengerJourney,
   recordBoardingEvent,
-  fetchJourneyByQrToken
+  fetchJourneyByQrToken,
+  publishCurrentBusLocation
 } from '../services/supabaseClient';
 import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, applyRoute4CoordinateOverrides } from '@shared/route4Stops';
 import { parsePassengerQRCode, isPriorityCategory } from '@shared/qrPassUtils';
@@ -149,7 +150,7 @@ export function RouteInformationPage() {
     )).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
   };
 
-  // Check GPS coordinates against all 15 Route 4 stops to trigger manual passenger registration popup
+  // Match GPS fixes against every stop so missed or out-of-order arrivals can recover.
   const lastTriggeredStopRef = useRef(null);
 
   const triggerArrivalAtStop = (stopIdx) => {
@@ -164,30 +165,79 @@ export function RouteInformationPage() {
 
   useEffect(() => {
     if (!isTripActive || !navigator.geolocation) return undefined;
+    let cancelled = false;
+    let busId = null;
+    let locationPublishWarningShown = false;
+
+    if (!isTestMode && dutySession.plateNumber) {
+      fetchOngoingTripForBus(dutySession.plateNumber).then((result) => {
+        if (cancelled) return;
+        if (result.success && result.data?.bus_id) {
+          busId = result.data.bus_id;
+          return;
+        }
+        setStatusMessage(result.success
+          ? 'Live GPS is not being shared: no ongoing trip is assigned to this bus.'
+          : `Live GPS could not be shared: ${result.error}`);
+      });
+    }
+
     const watchId = navigator.geolocation.watchPosition((position) => {
       const pLat = position.coords.latitude;
       const pLng = position.coords.longitude;
+      if (busId && !isTestMode) {
+        publishCurrentBusLocation(busId, {
+          latitude: pLat,
+          longitude: pLng,
+          speed: position.coords.speed == null ? null : position.coords.speed * 3.6,
+          heading: position.coords.heading,
+          accuracy: position.coords.accuracy
+        }).then((result) => {
+          if (cancelled || result.success || locationPublishWarningShown) return;
+          locationPublishWarningShown = true;
+          setStatusMessage(`Live GPS could not be shared: ${result.error}`);
+        });
+      }
 
-      for (let i = 0; i < stopsList.length; i++) {
-        const stop = stopsList[i];
-        if (!stop.lat || !stop.lng) continue;
-        const distance = Math.hypot(
-          (pLat - stop.lat) * 111,
-          (pLng - stop.lng) * 111 * Math.cos(pLat * Math.PI / 180)
-        );
+      const toRadians = (degrees) => degrees * Math.PI / 180;
+      const gpsAccuracyMeters = Number(position.coords.accuracy);
+      const arrivalRadiusMeters = Number.isFinite(gpsAccuracyMeters)
+        ? Math.max(250, Math.min(gpsAccuracyMeters, 300))
+        : 250;
+      let arrivalStopIndex = -1;
+      let closestDistanceMeters = Infinity;
 
-        if (distance <= 0.15) {
-          if (lastTriggeredStopRef.current !== (stop.id || i)) {
-            triggerArrivalAtStop(i);
-          }
-          return;
+      for (let index = 0; index < stopsList.length; index += 1) {
+        const stopLat = Number(stopsList[index].lat);
+        const stopLng = Number(stopsList[index].lng);
+        if (!Number.isFinite(stopLat) || !Number.isFinite(stopLng)) continue;
+
+        const latDelta = toRadians(stopLat - pLat);
+        const lngDelta = toRadians(stopLng - pLng);
+        const haversine = Math.sin(latDelta / 2) ** 2
+          + Math.cos(toRadians(pLat)) * Math.cos(toRadians(stopLat)) * Math.sin(lngDelta / 2) ** 2;
+        const distanceMeters = 6371000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+
+        if (distanceMeters <= arrivalRadiusMeters && distanceMeters < closestDistanceMeters) {
+          arrivalStopIndex = index;
+          closestDistanceMeters = distanceMeters;
         }
+      }
+
+      if (arrivalStopIndex < 0) return;
+      const arrivalStopKey = stopsList[arrivalStopIndex].id || arrivalStopIndex;
+      if (lastTriggeredStopRef.current !== arrivalStopKey) {
+        lastTriggeredStopRef.current = arrivalStopKey;
+        triggerArrivalAtStop(arrivalStopIndex);
       }
     }, (error) => setStatusMessage(`Waiting for bus location: ${error.message}`), {
       enableHighAccuracy: true, maximumAge: 3000, timeout: 15000
     });
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [isTripActive, currentStopIndex, stopsList]);
+    return () => {
+      cancelled = true;
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [isTripActive, currentStopIndex, stopsList, dutySession.plateNumber, isTestMode]);
 
   // QR Code Processing from Camera Scanner or Gun
   const handleQrScan = async (rawCode) => {
@@ -288,6 +338,7 @@ export function RouteInformationPage() {
     localStorage.setItem(tripSegmentKey, String(segmentStartedAt));
     setTripSegmentStartedAt(segmentStartedAt);
     setPassengerRegistry([]);
+    lastTriggeredStopRef.current = null;
     setCurrentStopIndex(0);
     setIsTripActive(true);
     setTripCount((prev) => prev + 1);

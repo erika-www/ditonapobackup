@@ -178,7 +178,10 @@ export function StartTripInterface({
   const [step, setStep] = useState('form');
   const [isAlone, setIsAlone] = useState(true);
   const [companionCount, setCompanionCount] = useState(0);
+  const [bookingCategory, setBookingCategory] = useState(currentUser?.category || 'Regular');
+  const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   const [savingTrip, setSavingTrip] = useState(false);
+  const [destinationReachedModalOpen, setDestinationReachedModalOpen] = useState(false);
 
   // Realtime Live Bus Tracking & Seat Occupancy State
   const [routeBusTrip, setRouteBusTrip] = useState(null);
@@ -189,7 +192,14 @@ export function StartTripInterface({
   const [occupancy, setOccupancy] = useState(null);
 
   const qrCanvasRef = useRef(null);
-  const [tripHistory, setTripHistory] = useState([]);
+  const [tripHistory, setTripHistory] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`qcbus_local_trips_${currentUser?.id || 'guest'}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [feedbackTrip, setFeedbackTrip] = useState(null);
   const [feedbackRating, setFeedbackRating] = useState(5);
   const [feedbackText, setFeedbackText] = useState('');
@@ -213,18 +223,58 @@ export function StartTripInterface({
     try { setHiddenTripIds(JSON.parse(localStorage.getItem(`qcbus_hidden_trips_${currentUser?.id || 'guest'}`) || '[]')); }
     catch { setHiddenTripIds([]); }
   }, [currentUser?.id]);
-  const reachedStopNotice = useRef(false);
 
   useEffect(() => {
-    if (!activeTrip || !liveBusCoords || reachedStopNotice.current) return;
+    if (currentUser?.category) {
+      setBookingCategory(currentUser.category);
+    }
+  }, [currentUser?.category]);
+
+  const reachedStopNotice = useRef(false);
+
+  // Proximity detection for destination reached via bus location
+  useEffect(() => {
+    if (!activeTrip || reachedStopNotice.current) return;
     const stop = activeTrip.toStop;
-    if (stop?.lat && stop?.lng && calculateDistanceKm(liveBusCoords.lat, liveBusCoords.lng, stop.lat, stop.lng) <= 0.15) {
-      reachedStopNotice.current = true;
-      onShowToast?.(`Your bus has reached ${stop.name}.`, 'stop-reached');
+    if (stop?.lat && stop?.lng && liveBusCoords?.lat && liveBusCoords?.lng) {
+      const dist = calculateDistanceKm(liveBusCoords.lat, liveBusCoords.lng, stop.lat, stop.lng);
+      if (dist <= 0.25) {
+        reachedStopNotice.current = true;
+        setDestinationReachedModalOpen(true);
+        onShowToast?.(`Your bus has reached ${stop.name || stop}.`, 'stop-reached');
+      }
     }
   }, [activeTrip, liveBusCoords, onShowToast]);
+
+  // Proximity detection for destination reached via device GPS
   useEffect(() => {
-    if (!activeTrip) reachedStopNotice.current = false;
+    if (!activeTrip || reachedStopNotice.current) return;
+    const stop = activeTrip.toStop;
+    if (!stop?.lat || !stop?.lng || !navigator.geolocation) return;
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        if (!activeTrip || reachedStopNotice.current) return;
+        const dist = calculateDistanceKm(pos.coords.latitude, pos.coords.longitude, stop.lat, stop.lng);
+        if (dist <= 0.25) {
+          reachedStopNotice.current = true;
+          setDestinationReachedModalOpen(true);
+          onShowToast?.(`You have reached your destination: ${stop.name || stop}`, 'stop-reached');
+        }
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
+    );
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [activeTrip, onShowToast]);
+
+  useEffect(() => {
+    if (!activeTrip) {
+      reachedStopNotice.current = false;
+      setDestinationReachedModalOpen(false);
+    }
   }, [activeTrip]);
 
   // Fetch Google Maps ETA based on starting/boarding stop and destination stop
@@ -264,10 +314,35 @@ export function StartTripInterface({
             toStop: tItem.destination_name,
             routeName: 'QC Bus Route 4',
             busPlate: tItem.trips?.buses?.plate_number || '',
-            companions: 0,
-            status: tItem.status === 'boarded' ? t.inProgressStatus : (tItem.status === 'completed' ? t.completedStatus : (tItem.status === 'cancelled' ? 'Cancelled' : t.plannedStatus))
+            companions: tItem.companions || 0,
+            totalPassengers: tItem.passenger_count || 1,
+            category: tItem.passenger_category || 'Regular',
+            status: tItem.status === 'completed'
+              ? 'Completed'
+              : (tItem.status === 'cancelled'
+                ? 'Cancelled'
+                : (tItem.status === 'boarded' ? t.inProgressStatus : t.plannedStatus))
           }));
-          setTripHistory(dbTrips);
+
+          setTripHistory(prev => {
+            const localSaved = (() => {
+              try {
+                return JSON.parse(localStorage.getItem(`qcbus_local_trips_${currentUser?.id || 'guest'}`) || '[]');
+              } catch { return []; }
+            })();
+            const map = new Map();
+            [...dbTrips, ...localSaved, ...prev].forEach(item => {
+              const key = item.dbId || item.id;
+              if (key && !map.has(key)) {
+                map.set(key, item);
+              }
+            });
+            const merged = Array.from(map.values());
+            try {
+              localStorage.setItem(`qcbus_local_trips_${currentUser?.id || 'guest'}`, JSON.stringify(merged));
+            } catch {}
+            return merged;
+          });
 
           // Restore active planned/boarded journey from DB if available
           const activeItem = res.data.find(tItem => tItem.status === 'planned' || tItem.status === 'boarded');
@@ -346,21 +421,30 @@ export function StartTripInterface({
 
   // Subscribe to the active trip and its bus, resolved from the selected route.
   useEffect(() => {
-    if (activeTab !== 'tracking' || !routeBusTrip?.id || !routeBusTrip?.bus_id) return undefined;
+    if ((activeTab !== 'tracking' && !activeTrip) || !routeBusTrip?.id || !routeBusTrip?.bus_id) return undefined;
     let mounted = true;
-    fetchCurrentBusLocation(routeBusTrip.bus_id).then((result) => {
-      if (mounted && result.success && result.data) setLiveBusCoords({
-        lat: result.data.latitude, lng: result.data.longitude,
-        speed: result.data.speed, updated_at: result.data.updated_at
+    const applyBusLocation = (location) => {
+      const updatedAt = Date.parse(location.updated_at);
+      const secondsAgo = Number.isFinite(updatedAt)
+        ? Math.max(0, Math.floor((Date.now() - updatedAt) / 1000))
+        : 0;
+      setLiveBusCoords({
+        lat: location.latitude, lng: location.longitude,
+        speed: location.speed, updated_at: location.updated_at
       });
+      setLastUpdatedSecondsAgo(secondsAgo);
+      setIsSignalLost(secondsAgo > 60);
+    };
+
+    setLiveBusCoords(null);
+    fetchCurrentBusLocation(routeBusTrip.bus_id).then((result) => {
+      if (mounted && result.success && result.data) applyBusLocation(result.data);
     });
     fetchTripOccupancy(routeBusTrip.id).then((result) => {
       if (mounted && result.success && result.data) setOccupancy(result.data);
     });
     const unsubscribeLocation = subscribeToBusLocation(routeBusTrip.bus_id, (location) => {
-      setLiveBusCoords({ lat: location.latitude, lng: location.longitude, speed: location.speed, updated_at: location.updated_at });
-      setLastUpdatedSecondsAgo(0);
-      setIsSignalLost(false);
+      applyBusLocation(location);
     });
     const unsubscribeOccupancy = subscribeToTripOccupancy(routeBusTrip.id, setOccupancy);
     return () => {
@@ -368,17 +452,17 @@ export function StartTripInterface({
       unsubscribeLocation();
       unsubscribeOccupancy();
     };
-  }, [activeTab, routeBusTrip?.id, routeBusTrip?.bus_id]);
+  }, [activeTab, activeTrip, routeBusTrip?.id, routeBusTrip?.bus_id]);
 
   useEffect(() => {
-    if (activeTab !== 'tracking' || !liveBusCoords?.updated_at) return undefined;
+    if ((activeTab !== 'tracking' && !activeTrip) || !liveBusCoords?.updated_at) return undefined;
     const timer = setInterval(() => {
       const seconds = Math.floor((Date.now() - new Date(liveBusCoords.updated_at).getTime()) / 1000);
       setLastUpdatedSecondsAgo(seconds);
       setIsSignalLost(seconds > 60);
     }, 5000);
     return () => clearInterval(timer);
-  }, [activeTab, liveBusCoords?.updated_at]);
+  }, [activeTab, activeTrip, liveBusCoords?.updated_at]);
 
   const handleRouteChange = (routeId) => {
     const selected = QC_ROUTES.find(r => r.id === routeId) || QC_ROUTES[0];
@@ -389,26 +473,33 @@ export function StartTripInterface({
   };
 
   const handleDetectNearestStop = () => {
-    if (navigator.geolocation) {
-      if (onShowToast) onShowToast('Detecting location...');
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const lat = pos.coords.latitude;
-          const lng = pos.coords.longitude;
-          const nearest = findNearestStop(lat, lng, selectedRoute.stops);
-          if (nearest && nearest.stop) {
-            setStartStop(nearest.stop);
-            if (onShowToast) onShowToast(`Nearest stop found: ${nearest.stop.name} (${nearest.formattedDistance})`);
-          } else {
-            if (onShowToast) onShowToast('Could not determine nearest stop.');
-          }
-        },
-        (err) => {
-          if (onShowToast) onShowToast('Location access denied or unavailable.');
-        },
-        { enableHighAccuracy: true, timeout: 8000 }
-      );
+    if (!navigator.geolocation) {
+      if (onShowToast) onShowToast('Geolocation is not supported by your browser.');
+      return;
     }
+    setIsDetectingLocation(true);
+    if (onShowToast) onShowToast('Detecting nearest stop to your location...');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setIsDetectingLocation(false);
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        const candidateStops = configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS;
+        const nearest = findNearestStop(lat, lng, candidateStops);
+        if (nearest && nearest.stop) {
+          setStartStop(nearest.stop);
+          if (onShowToast) onShowToast(`Nearest stop found: ${nearest.stop.name} (${nearest.formattedDistance})`);
+        } else {
+          if (onShowToast) onShowToast('Could not determine nearest stop.');
+        }
+      },
+      (err) => {
+        setIsDetectingLocation(false);
+        console.warn('Geolocation error:', err);
+        if (onShowToast) onShowToast('Location access denied or unavailable.');
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+    );
   };
 
   const handleConfirmRouteSelection = () => {
@@ -444,17 +535,19 @@ export function StartTripInterface({
     setSavingTrip(true);
     try {
       const bus = { plateNumber: routeBusTrip?.bus?.plate_number || 'QC-BUS' };
+      const companionNumber = isAlone ? 0 : companionCount;
       const totalPassengerCount = isAlone ? 1 : 1 + companionCount;
       const travelMins = googleEta?.durationMins || 15;
-      const category = currentUser?.category || 'Regular';
+      const category = bookingCategory || currentUser?.category || 'Regular';
 
       // Generate unique trip ID per passenger per day strictly formatted as MMDDYY-xxxxx
       const dailyTripId = generateDailyTripId();
 
-      // Standard scannable JSON QR payload
+      // Standard scannable JSON QR payload matching selected details
       const qrPayloadString = createPassengerQrPayload({
         tripId: dailyTripId,
         count: totalPassengerCount,
+        companions: companionNumber,
         category,
         boardingStop: startStop.name,
         destinationStop: endStop.name,
@@ -471,7 +564,9 @@ export function StartTripInterface({
         destination_lng: endStop.lng || null,
         qr_token: dailyTripId,
         passenger_name: currentUser?.name || currentUser?.email || 'Passenger',
-        registration_source: 'app'
+        registration_source: 'app',
+        passenger_category: category,
+        passenger_count: totalPassengerCount
       });
 
       if (!res.success) {
@@ -488,7 +583,7 @@ export function StartTripInterface({
         toStop: endStop,
         route: selectedRoute,
         bus: bus,
-        companions: isAlone ? 0 : companionCount,
+        companions: companionNumber,
         totalPassengers: totalPassengerCount,
         category,
         status: 'In Progress',
@@ -570,18 +665,25 @@ export function StartTripInterface({
       routeName: activeTrip.route?.name || 'QC Bus Route 4',
       busPlate: activeTrip.bus?.plateNumber || routeBusTrip?.bus?.plate_number || '',
       companions: activeTrip.companions || 0,
-      status: t.completedStatus
+      totalPassengers: activeTrip.totalPassengers || 1,
+      category: activeTrip.category || 'Regular',
+      status: 'Completed'
     };
     setTripHistory((rows) => {
       const id = completedHistoryItem.dbId || completedHistoryItem.id;
       const alreadyListed = rows.some((row) => (row.dbId || row.id) === id);
-      return alreadyListed
+      const nextRows = alreadyListed
         ? rows.map((row) => (row.dbId || row.id) === id ? { ...row, ...completedHistoryItem } : row)
         : [completedHistoryItem, ...rows];
+      try {
+        localStorage.setItem(`qcbus_local_trips_${currentUser?.id || 'guest'}`, JSON.stringify(nextRows));
+      } catch {}
+      return nextRows;
     });
     if (!activeTrip.localTest) setFeedbackTrip(activeTrip);
     setActiveTrip(null);
     setStep('form');
+    setDestinationReachedModalOpen(false);
     await recallUserPastActions();
     if (onShowToast) onShowToast('Trip completed safely!');
   };
@@ -596,8 +698,33 @@ export function StartTripInterface({
       }
     }
     if (activeTrip.localTest && localActiveJourneyKey) localStorage.removeItem(localActiveJourneyKey);
+    const cancelledHistoryItem = {
+      id: activeTrip.id,
+      dbId: activeTrip.dbId,
+      date: new Date().toLocaleDateString(),
+      fromStop: activeTrip.fromStop.name || activeTrip.fromStop,
+      toStop: activeTrip.toStop.name || activeTrip.toStop,
+      routeName: activeTrip.route?.name || 'QC Bus Route 4',
+      busPlate: activeTrip.bus?.plateNumber || routeBusTrip?.bus?.plate_number || '',
+      companions: activeTrip.companions || 0,
+      totalPassengers: activeTrip.totalPassengers || 1,
+      category: activeTrip.category || 'Regular',
+      status: 'Cancelled'
+    };
+    setTripHistory((rows) => {
+      const id = cancelledHistoryItem.dbId || cancelledHistoryItem.id;
+      const alreadyListed = rows.some((row) => (row.dbId || row.id) === id);
+      const nextRows = alreadyListed
+        ? rows.map((row) => (row.dbId || row.id) === id ? { ...row, ...cancelledHistoryItem } : row)
+        : [cancelledHistoryItem, ...rows];
+      try {
+        localStorage.setItem(`qcbus_local_trips_${currentUser?.id || 'guest'}`, JSON.stringify(nextRows));
+      } catch {}
+      return nextRows;
+    });
     setActiveTrip(null);
     setStep('form');
+    setDestinationReachedModalOpen(false);
     await recallUserPastActions();
     if (onShowToast) onShowToast('Trip cancelled.');
   };
@@ -691,25 +818,90 @@ export function StartTripInterface({
                 </div>
               </div>
 
-              <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center', backgroundColor: 'var(--bg-subtle)', padding: '1rem', borderRadius: 'var(--radius-md)' }}>
-                <div style={{ background: '#fff', padding: '0.5rem', borderRadius: '8px' }}>
-                  <canvas ref={qrCanvasRef} style={{ width: '240px', height: '275px', display: 'block' }} />
+              {/* Digital Boarding Pass Display - Image 2 Format */}
+              <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1.25rem', borderRadius: 'var(--radius-md)' }}>
+                <div style={{ fontWeight: 800, fontSize: '1.2rem', marginBottom: '1rem', color: 'var(--text-primary)' }}>
+                  Your Digital QR Boarding Pass:
                 </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: '0.35rem' }}>{t.digitalPassTitle}</div>
-                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '0 0 0.35rem' }}>
-                    Passengers on this pass: <strong>{activeTrip.totalPassengers || (Number(activeTrip.companions || 0) + 1)}</strong>
-                  </p>
-                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
-                    {t.showToConductor}
-                  </p>
-                  <button type="button" onClick={handleSaveQR} className="btn-secondary" style={{ fontSize: '0.8rem', padding: '0.4rem 0.85rem' }}>
-                    <Download size={14} /> {t.saveQRBtn}
-                  </button>
+
+                <div style={{ display: 'flex', gap: '2rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                  {/* Left Column: QR Code Canvas + Save QR Pass Image Button */}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                    <div style={{ background: '#ffffff', padding: '0.5rem', borderRadius: '4px', border: '1px solid #e2e8f0', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+                      <canvas ref={qrCanvasRef} style={{ width: '220px', height: '220px', display: 'block' }} />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleSaveQR}
+                      className="btn-secondary"
+                      style={{
+                        marginTop: '0.85rem',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.45rem',
+                        fontSize: '0.88rem',
+                        fontWeight: 600,
+                        padding: '0.5rem 0.95rem',
+                        backgroundColor: '#f1f5f9',
+                        color: '#0f172a',
+                        border: '1px solid #cbd5e1',
+                        borderRadius: '6px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <Download size={15} /> Save QR Pass Image
+                    </button>
+                  </div>
+
+                  {/* Right Column: Pass Details Card with purple border + Passengers on pass text */}
+                  <div style={{ flex: 1, minWidth: '260px' }}>
+                    <div style={{
+                      border: '1px solid #c084fc',
+                      borderRadius: '6px',
+                      backgroundColor: '#ffffff',
+                      padding: '0.9rem 1.15rem',
+                      lineHeight: '1.6',
+                      fontSize: '0.9rem',
+                      marginBottom: '1rem',
+                      boxShadow: '0 1px 3px rgba(192, 132, 252, 0.15)'
+                    }}>
+                      <div style={{ fontWeight: 800, color: '#0f172a', marginBottom: '0.2rem' }}>
+                        Pass ID: {activeTrip.id}
+                      </div>
+                      <div style={{ fontWeight: 700, color: isPriorityCategory(activeTrip.category) ? '#b45309' : '#0284c7', marginBottom: '0.2rem' }}>
+                        Category: {activeTrip.category || 'Regular'} ({isPriorityCategory(activeTrip.category) ? 'Priority Seat /20' : 'Regular Seat /30'})
+                      </div>
+                      <div style={{ color: '#334155' }}>
+                        From: {activeTrip.fromStop?.name || activeTrip.fromStop}
+                      </div>
+                      <div style={{ color: '#334155' }}>
+                        To: {activeTrip.toStop?.name || activeTrip.toStop}
+                      </div>
+                      <div style={{ fontWeight: 700, color: '#16a34a', marginTop: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                        ✓ {activeTrip.companions > 0 ? `1 + ${activeTrip.companions} companion(s)` : 'Solo Passenger'} · Valid Single Entry
+                      </div>
+                    </div>
+
+                    <div style={{ fontWeight: 700, fontSize: '0.98rem', color: 'var(--text-primary)', marginBottom: '0.25rem' }}>
+                      Passengers on this pass: {activeTrip.totalPassengers || (Number(activeTrip.companions || 0) + 1)}
+                    </div>
+                    <div style={{ fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
+                      Show this pass to the bus conductor upon boarding
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.25rem', justifyContent: 'flex-end' }}>
+              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.25rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => setDestinationReachedModalOpen(true)}
+                  className="btn-secondary"
+                  style={{ fontSize: '0.85rem' }}
+                  title="Test Destination Reached Popup"
+                >
+                  <MapPin size={14} /> Test Reached Stop Popup
+                </button>
                 <button type="button" onClick={handleCancelJourney} className="btn-danger" style={{ fontSize: '0.85rem' }}>
                   Cancel Trip
                 </button>
@@ -774,19 +966,22 @@ export function StartTripInterface({
                       <label className="form-label">{t.boardingStop}</label>
                       <select
                         className="form-select"
-                        value={startStop.id}
+                        value={isDetectingLocation ? 'detect' : startStop.id}
                         disabled={!!activeTrip}
                         onChange={(e) => {
                           if (e.target.value === 'detect') {
                             handleDetectNearestStop();
                           } else {
-                            const s = ROUTE4_STOPS.find(st => st.id === e.target.value);
+                            const stopsPool = configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS;
+                            const s = stopsPool.find(st => st.id === e.target.value);
                             if (s) setStartStop(s);
                           }
                         }}
                       >
-                        <option value="detect">📍 Detect Nearest Stop (GPS)</option>
-                        {ROUTE4_STOPS.map((stop, idx) => (
+                        <option value="detect" disabled={isDetectingLocation}>
+                          {isDetectingLocation ? '⏳ Detecting Nearest Stop...' : '📍 Detect Nearest Stop'}
+                        </option>
+                        {(configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS).map((stop, idx) => (
                           <option key={stop.id} value={stop.id}>
                             Stop {stop.stopNumber || idx + 1}: {stop.name}
                           </option>
@@ -801,11 +996,12 @@ export function StartTripInterface({
                         value={endStop.id}
                         disabled={!!activeTrip}
                         onChange={(e) => {
-                          const s = ROUTE4_STOPS.find(st => st.id === e.target.value);
+                          const stopsPool = configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS;
+                          const s = stopsPool.find(st => st.id === e.target.value);
                           if (s) setEndStop(s);
                         }}
                       >
-                        {ROUTE4_STOPS.map((stop, idx) => (
+                        {(configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS).map((stop, idx) => (
                           <option key={stop.id} value={stop.id}>
                             Stop {stop.stopNumber || idx + 1}: {stop.name}
                           </option>
@@ -876,18 +1072,38 @@ export function StartTripInterface({
                   </button>
                 </div>
 
-                {!isAlone && <div className="form-group" style={{ maxWidth: '300px', margin: '0 auto 1.5rem auto' }}>
-                  <label className="form-label">Companions</label>
-                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem' }}>
-                    <button type="button" aria-label="Remove one companion" className="btn-secondary" disabled={companionCount <= 1} onClick={() => setCompanionCount(count => Math.max(1, count - 1))}>−</button>
-                    <output aria-live="polite" style={{ minWidth: '2rem', fontWeight: 800, fontSize: '1.2rem' }}>{companionCount}</output>
-                    <button type="button" aria-label="Add one companion" className="btn-secondary" onClick={() => setCompanionCount(count => Math.min(9, count + 1))}>+</button>
+                {!isAlone && (
+                  <div className="form-group" style={{ maxWidth: '300px', margin: '0 auto 1.25rem auto' }}>
+                    <label className="form-label">Companions (How many are with you)</label>
+                    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem' }}>
+                      <button type="button" aria-label="Remove one companion" className="btn-secondary" disabled={companionCount <= 1} onClick={() => setCompanionCount(count => Math.max(1, count - 1))}>−</button>
+                      <output aria-live="polite" style={{ minWidth: '2rem', fontWeight: 800, fontSize: '1.2rem' }}>{companionCount}</output>
+                      <button type="button" aria-label="Add one companion" className="btn-secondary" onClick={() => setCompanionCount(count => Math.min(9, count + 1))}>+</button>
+                    </div>
                   </div>
-                </div>}
+                )}
+
+                {/* Passenger Category Selector matching user details */}
+                <div className="form-group" style={{ maxWidth: '360px', margin: '0.75rem auto 1.5rem auto', textAlign: 'left' }}>
+                  <label className="form-label" style={{ fontWeight: 600 }}>Passenger Category</label>
+                  <select
+                    className="form-select"
+                    value={bookingCategory}
+                    onChange={(e) => setBookingCategory(e.target.value)}
+                  >
+                    <option value="Regular">Regular (Standard Commuter)</option>
+                    <option value="Senior Citizen">Senior Citizen (Priority / 20% Subsidy)</option>
+                    <option value="Person with Disability (PWD)">Person with Disability (PWD / Priority)</option>
+                    <option value="Student">Student (Priority / Discounted)</option>
+                    <option value="Pregnant">Pregnant (Priority Seating)</option>
+                  </select>
+                </div>
 
                 <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
                   <button type="button" onClick={() => setStep('form')} className="btn-secondary">Back</button>
-                  <button type="button" onClick={handleCompanionConfirm} disabled={savingTrip} className="btn-primary">{savingTrip ? 'Saving trip…' : <>{t.confirmAndSummary} →</>}</button>
+                  <button type="button" onClick={handleCompanionConfirm} disabled={savingTrip} className="btn-primary">
+                    {savingTrip ? 'Saving trip…' : <>{t.confirmAndSummary} →</>}
+                  </button>
                 </div>
               </div>
             )}
@@ -899,52 +1115,8 @@ export function StartTripInterface({
       {/* TAB: PASSENGER DASHBOARD (Ridership Trends & Analysis) */}
       {activeTab === 'dashboard' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          {/* Header Banner */}
-          <div className="glass-card" style={{
-            background: 'linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(6, 182, 212, 0.12))',
-            border: '1px solid rgba(139, 92, 246, 0.35)',
-            position: 'relative',
-            overflow: 'hidden'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem' }}>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
-                  <span className="badge badge-success" style={{ fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
-                    <Sparkles size={13} /> QC Free Transit Subsidy Active
-                  </span>
-                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Route 4 Arterial Corridor</span>
-                </div>
-                <h1 style={{ fontSize: '1.65rem', margin: '0 0 0.35rem 0', fontFamily: 'var(--font-heading)' }}>
-                  Passenger Ridership Dashboard
-                </h1>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.92rem', margin: 0, maxWidth: '650px' }}>
-                  Welcome back, <strong>{currentUser?.name || 'Quezon City Commuter'}</strong>. Here is your personalized ridership summary, free fare savings, and Route 4 commute pattern analysis.
-                </p>
-              </div>
-
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('home')}
-                  className="btn-primary"
-                  style={{ fontSize: '0.85rem', padding: '0.5rem 1rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
-                >
-                  <Home size={15} /> Book Route 4 Trip
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('tracking')}
-                  className="btn-secondary"
-                  style={{ fontSize: '0.85rem', padding: '0.5rem 1rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
-                >
-                  <Navigation size={15} /> Live Bus Map
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* 4 Stat Metric Cards */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '1rem' }}>
+          {/* Stat Metric Cards (Free Fare Savings and CO2 Reduction cards removed per user request) */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
             {/* Card 1: Total Trips */}
             <div className="glass-card" style={{ padding: '1.25rem', borderLeft: '4px solid #8b5cf6' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
@@ -961,23 +1133,7 @@ export function StartTripInterface({
               </div>
             </div>
 
-            {/* Card 2: Cumulative Fare Savings */}
-            <div className="glass-card" style={{ padding: '1.25rem', borderLeft: '4px solid #10b981' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: 700 }}>FREE FARE SAVINGS</span>
-                <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: 'rgba(16, 185, 129, 0.15)', display: 'grid', placeItems: 'center', color: '#10b981' }}>
-                  <DollarSign size={18} />
-                </div>
-              </div>
-              <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#10b981', marginBottom: '0.2rem' }}>
-                ₱{(Math.max(visibleTripHistory.length, 14) * 35).toLocaleString()}.00
-              </div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                100% QC LGU Subsidized Fare
-              </div>
-            </div>
-
-            {/* Card 3: Kilometers Traveled */}
+            {/* Card 2: Kilometers Traveled */}
             <div className="glass-card" style={{ padding: '1.25rem', borderLeft: '4px solid #06b6d4' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
                 <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: 700 }}>CORRIDOR DISTANCE</span>
@@ -990,22 +1146,6 @@ export function StartTripInterface({
               </div>
               <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                 Traversed along 15 Route 4 Stops
-              </div>
-            </div>
-
-            {/* Card 4: Carbon Footprint Reduced */}
-            <div className="glass-card" style={{ padding: '1.25rem', borderLeft: '4px solid #eab308' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: 700 }}>CO₂ REDUCTION</span>
-                <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: 'rgba(234, 179, 8, 0.15)', display: 'grid', placeItems: 'center', color: '#eab308' }}>
-                  <Leaf size={18} />
-                </div>
-              </div>
-              <div style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '0.2rem' }}>
-                ~{(Math.max(visibleTripHistory.length, 14) * 1.42).toFixed(1)} kg
-              </div>
-              <div style={{ fontSize: '0.75rem', color: '#10b981', fontWeight: 600 }}>
-                Green Urban Transport Advocate
               </div>
             </div>
           </div>
@@ -1215,14 +1355,26 @@ export function StartTripInterface({
                   }}
                 >
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '.5rem', marginBottom: '.25rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '.5rem', marginBottom: '.25rem', flexWrap: 'wrap' }}>
                       <strong style={{ fontSize: '.95rem' }}>{item.fromStop} → {item.toStop}</strong>
                       <span className="badge badge-secondary" style={{ fontSize: '.7rem' }}>
                         Pass #{item.id}
                       </span>
+                      <span
+                        className="badge"
+                        style={{
+                          fontSize: '.72rem',
+                          fontWeight: 700,
+                          backgroundColor: item.status === 'Completed' ? 'rgba(16, 185, 129, 0.15)' : (item.status === 'Cancelled' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(6, 182, 212, 0.15)'),
+                          color: item.status === 'Completed' ? '#10b981' : (item.status === 'Cancelled' ? '#ef4444' : '#06b6d4'),
+                          border: `1px solid ${item.status === 'Completed' ? '#10b981' : (item.status === 'Cancelled' ? '#ef4444' : '#06b6d4')}`
+                        }}
+                      >
+                        {item.status}
+                      </span>
                     </div>
                     <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                      Status: <strong style={{ color: item.status === 'Completed' ? '#10b981' : '#06b6d4' }}>{item.status}</strong> | Date: {item.date}{item.busPlate ? ` | Bus: ${item.busPlate}` : ''}
+                      Status: <strong style={{ color: item.status === 'Completed' ? '#10b981' : (item.status === 'Cancelled' ? '#ef4444' : '#06b6d4') }}>{item.status}</strong> | Date: {item.date}{item.busPlate ? ` | Bus: ${item.busPlate}` : ''}{item.category ? ` | ${item.category}` : ''}
                     </div>
                   </div>
                   <button
@@ -1436,6 +1588,107 @@ export function StartTripInterface({
             <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
               <button type="button" onClick={onLogout} className="btn-danger" style={{ width: '100%', padding: '0.8rem', justifyContent: 'center' }}>
                 <LogOut size={16} /> {t.logoutBtn}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Destination Reached Popup Modal */}
+      {destinationReachedModalOpen && activeTrip && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="destination-modal-title"
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.75)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+            padding: '1.25rem'
+          }}
+        >
+          <div
+            className="glass-card"
+            style={{
+              maxWidth: '480px',
+              width: '100%',
+              padding: '2rem',
+              textAlign: 'center',
+              backgroundColor: 'var(--bg-card, #ffffff)',
+              borderRadius: '16px',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.35)',
+              border: '2px solid #10b981'
+            }}
+          >
+            <div style={{
+              width: '64px',
+              height: '64px',
+              borderRadius: '50%',
+              backgroundColor: 'rgba(16, 185, 129, 0.15)',
+              color: '#10b981',
+              display: 'grid',
+              placeItems: 'center',
+              margin: '0 auto 1.25rem'
+            }}>
+              <CheckCircle size={36} />
+            </div>
+
+            <span className="badge badge-success" style={{ marginBottom: '0.75rem', fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>
+              📍 Arrival Notification
+            </span>
+
+            <h2 id="destination-modal-title" style={{ fontSize: '1.35rem', fontWeight: 800, margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>
+              You Have Reached Your Destination!
+            </h2>
+
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', margin: '0 0 1.25rem 0', lineHeight: 1.5 }}>
+              The bus has arrived at <strong>{activeTrip.toStop?.name || activeTrip.toStop}</strong>. Please gather your personal belongings and alight safely.
+            </p>
+
+            <div style={{
+              backgroundColor: 'var(--bg-subtle)',
+              border: '1px solid var(--border-color)',
+              borderRadius: '8px',
+              padding: '0.85rem 1rem',
+              marginBottom: '1.5rem',
+              textAlign: 'left',
+              fontSize: '0.85rem',
+              lineHeight: 1.6
+            }}>
+              <div><strong>Pass ID:</strong> {activeTrip.id}</div>
+              <div><strong>Boarding Stop:</strong> {activeTrip.fromStop?.name || activeTrip.fromStop}</div>
+              <div><strong>Destination Stop:</strong> {activeTrip.toStop?.name || activeTrip.toStop}</div>
+              <div><strong>Category:</strong> {activeTrip.category || 'Regular'}</div>
+              <div><strong>Passengers:</strong> {activeTrip.totalPassengers || 1}</div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
+              <button
+                type="button"
+                className="btn-primary"
+                style={{ flex: 1, padding: '0.75rem 1rem', fontSize: '0.92rem' }}
+                onClick={() => {
+                  setDestinationReachedModalOpen(false);
+                  handleCompleteJourney();
+                }}
+              >
+                Complete Journey
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ padding: '0.75rem 1.25rem', fontSize: '0.92rem' }}
+                onClick={() => setDestinationReachedModalOpen(false)}
+              >
+                Dismiss
               </button>
             </div>
           </div>

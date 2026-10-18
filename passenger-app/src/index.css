@@ -250,6 +250,49 @@ button {
   animation: pulse 1.5s infinite;
 }
 
+.live-bus-position {
+  display: block;
+  position: relative;
+  width: 30px;
+  height: 30px;
+}
+
+.live-bus-position-pulse,
+.live-bus-position-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.live-bus-position-pulse {
+  width: 30px;
+  height: 30px;
+  background: var(--bus-position-color);
+  opacity: 0.35;
+  animation: liveBusPositionPulse 1.8s ease-out infinite;
+}
+
+.live-bus-position-dot {
+  width: 15px;
+  height: 15px;
+  background: var(--bus-position-color);
+  border: 3px solid #ffffff;
+  box-shadow: 0 0 10px var(--bus-position-color);
+}
+
+@keyframes liveBusPositionPulse {
+  0% {
+    opacity: 0.45;
+    transform: translate(-50%, -50%) scale(0.55);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
 @keyframes pulse {
   0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.7); }
   70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(22, 163, 74, 0); }
