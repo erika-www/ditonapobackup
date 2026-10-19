@@ -504,6 +504,11 @@ export async function startDutyTripForBus({ plateNumber, busCapacity, driverPers
     }
 
     let trip = null;
+    const tripCreationErrors = [];
+    const rememberTripError = (stage, error) => {
+      if (!error) return;
+      tripCreationErrors.push(`${stage}: ${error.message || String(error)}`);
+    };
 
     // 1. First attempt: Call 5-parameter RPC start_or_resume_trip_for_bus
     try {
@@ -516,8 +521,12 @@ export async function startDutyTripForBus({ plateNumber, busCapacity, driverPers
       });
       if (!rpcError && rpcTrip) {
         trip = rpcTrip;
+      } else {
+        rememberTripError('assigned-personnel trip RPC', rpcError);
       }
-    } catch (_) {}
+    } catch (error) {
+      rememberTripError('assigned-personnel trip RPC', error);
+    }
 
     // 2. Second attempt: Call 2-parameter legacy RPC if 5-parameter signature is missing
     if (!trip) {
@@ -535,21 +544,28 @@ export async function startDutyTripForBus({ plateNumber, busCapacity, driverPers
               conductor_personnel_id: conductor.personnel_id,
               dispatcher_personnel_id: dispatcher?.personnel_id || null
             }).eq('id', trip.id);
-          } catch (_) {}
+          } catch (error) {
+            rememberTripError('trip personnel assignment', error);
+          }
+        } else {
+          rememberTripError('legacy trip RPC', legacyRpcError);
         }
-      } catch (_) {}
+      } catch (error) {
+        rememberTripError('legacy trip RPC', error);
+      }
     }
 
     // 3. Third attempt: Query trips table directly
     if (!trip) {
       try {
-        const { data: existingTrips } = await supabase
+        const { data: existingTrips, error: existingTripsError } = await supabase
           .from('trips')
           .select('*')
           .eq('bus_id', bus.id)
           .eq('status', 'ongoing')
           .order('started_at', { ascending: false })
           .limit(1);
+        if (existingTripsError) throw existingTripsError;
 
         if (existingTrips && existingTrips.length > 0) {
           trip = existingTrips[0];
@@ -585,13 +601,17 @@ export async function startDutyTripForBus({ plateNumber, busCapacity, driverPers
               .maybeSingle();
             if (!insErr && inserted) {
               trip = inserted;
+            } else {
+              rememberTripError('trip insert with personnel', insErr);
             }
-          } catch (_) {}
+          } catch (error) {
+            rememberTripError('trip insert with personnel', error);
+          }
 
           // Fallback insert without duty columns if schema doesn't have them
           if (!trip) {
             try {
-              const { data: fallbackInserted } = await supabase
+              const { data: fallbackInserted, error: fallbackInsertError } = await supabase
                 .from('trips')
                 .insert({
                   bus_id: bus.id,
@@ -601,17 +621,25 @@ export async function startDutyTripForBus({ plateNumber, busCapacity, driverPers
                 })
                 .select()
                 .maybeSingle();
+              if (fallbackInsertError) throw fallbackInsertError;
               if (fallbackInserted) trip = fallbackInserted;
-            } catch (_) {}
+            } catch (error) {
+              rememberTripError('legacy trip insert', error);
+            }
           }
         }
-      } catch (_) {}
+      } catch (error) {
+        rememberTripError('trip lookup', error);
+      }
     }
 
     // Never manufacture a local trip ID. Passenger registration requires a
     // real ongoing database trip so every count belongs to the correct run.
     if (!trip) {
-      throw new Error('Unable to create an ongoing database trip for this duty session.');
+      const detail = tripCreationErrors.at(-1);
+      throw new Error(detail
+        ? `Unable to create an ongoing database trip. ${detail}`
+        : 'Unable to create an ongoing database trip for this duty session.');
     }
 
     return { success: true, data: { bus, route, trip, personnel: { driver, conductor, dispatcher } } };
