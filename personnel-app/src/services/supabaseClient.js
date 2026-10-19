@@ -8,6 +8,9 @@ import { parsePassengerQRCode, isPriorityCategory } from '@shared/qrPassUtils';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// This deployment is currently a functionality-test build. Set the flag to
+// "false" when authentication must be restored.
+export const TEST_ACCESS_MODE = import.meta.env.VITE_ENABLE_TEST_MODE !== 'false';
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   throw new Error('Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in this app’s .env file.');
@@ -122,6 +125,17 @@ export async function recordBoardingEvent({
 
 export async function correctBoardingEvent(eventId, reversalReason) {
   try {
+    if (TEST_ACCESS_MODE) {
+      const { data, error } = await supabase.from('boarding_events')
+        .update({ is_reversed: true, reversal_reason: reversalReason })
+        .eq('id', eventId)
+        .eq('is_reversed', false)
+        .select('id')
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) throw new Error('The boarding event was not found or was already reversed.');
+      return { success: true, data: { success: true, event_id: data.id } };
+    }
     const { data, error } = await supabase.rpc('correct_boarding_event', {
       p_event_id: eventId,
       p_reversal_reason: reversalReason
@@ -225,8 +239,10 @@ export async function fetchAdminSignupRequests() {
 
 export async function reviewAdminSignupRequest(request) {
   try {
-    const { data: authData, error: authError } = await supabase.auth.getUser();
-    if (authError || !authData.user) throw new Error('Administrator session required.');
+    const { data: authData, error: authError } = TEST_ACCESS_MODE
+      ? { data: { user: null }, error: null }
+      : await supabase.auth.getUser();
+    if (!TEST_ACCESS_MODE && (authError || !authData.user)) throw new Error('Administrator session required.');
     const status = request.approve ? 'approved' : 'rejected';
     if (request.approve) {
       const { data, error } = await supabase.from('profiles').update({ role: 'admin' })
@@ -235,7 +251,7 @@ export async function reviewAdminSignupRequest(request) {
       if (!data) throw new Error('Could not grant admin access to this account.');
     }
     const { error } = await supabase.from('admin_signup_requests').update({
-      status, reviewed_at: new Date().toISOString(), reviewed_by: authData.user.id
+      status, reviewed_at: new Date().toISOString(), reviewed_by: authData.user?.id || null
     }).eq('id', request.requestId);
     if (error) throw error;
     return { success: true };
@@ -445,12 +461,14 @@ export async function startDutyTripForBus({ plateNumber, busCapacity, driverPers
       throw new Error('Enter a valid bus plate number and capacity.');
     }
 
-    const { data: authData, error: authError } = await supabase.auth.getUser();
-    if (authError || !authData.user) throw new Error('No pre-authorized administrator session is available on this bus deployment.');
-    const { data: profile, error: profileError } = await supabase
-      .from('profiles').select('role').eq('id', authData.user.id).maybeSingle();
-    if (profileError) throw profileError;
-    if (profile?.role !== 'admin') throw new Error('This deployment session is not authorized for bus operations.');
+    if (!TEST_ACCESS_MODE) {
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError || !authData.user) throw new Error('No pre-authorized administrator session is available on this bus deployment.');
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles').select('role').eq('id', authData.user.id).maybeSingle();
+      if (profileError) throw profileError;
+      if (profile?.role !== 'admin') throw new Error('This deployment session is not authorized for bus operations.');
+    }
 
     const safeDriverId = driverPersonnelId || 'DRV-1001';
     const safeConductorId = conductorPersonnelId || 'CND-1001';
@@ -962,6 +980,24 @@ export async function createManualPassengerJourney({ passengerName, passengerCat
 export async function startNextTrip({ currentTripId, direction }) {
   try {
     if (!currentTripId) throw new Error('An ongoing trip is required.');
+    if (TEST_ACCESS_MODE) {
+      const { data: currentTrip, error: currentTripError } = await supabase.from('trips')
+        .select('bus_id,route_id,driver_personnel_id,conductor_personnel_id,dispatcher_personnel_id')
+        .eq('id', currentTripId)
+        .single();
+      if (currentTripError) throw currentTripError;
+      const { error: closeError } = await supabase.from('trips')
+        .update({ status: 'completed', ended_at: new Date().toISOString() })
+        .eq('id', currentTripId);
+      if (closeError) throw closeError;
+      const { data: nextTrip, error: nextTripError } = await supabase.from('trips').insert({
+        ...currentTrip,
+        status: 'ongoing',
+        started_at: new Date().toISOString()
+      }).select('*').single();
+      if (nextTripError) throw nextTripError;
+      return { success: true, data: { ...nextTrip, direction } };
+    }
     const operationId = `next-trip-${currentTripId}-${Date.now()}`;
     const { data, error } = await supabase.rpc('start_next_trip', {
       p_operation_id: operationId,

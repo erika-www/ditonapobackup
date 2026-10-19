@@ -3,48 +3,34 @@
  * Manages duty session details, personnel profile, and access authorization for QC Bus Admin.
  */
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { fetchPassengerRegistry, loginAdmin, logoutAdmin, startDutyTripForBus, startNextTrip, supabase } from '../services/supabaseClient';
+import { fetchPassengerRegistry, loginAdmin, logoutAdmin, startDutyTripForBus, startNextTrip, supabase, TEST_ACCESS_MODE } from '../services/supabaseClient';
 
 const AuthContext = createContext({});
 
 const UUID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
-const ENABLE_TEST_MODE = import.meta.env.DEV && import.meta.env.VITE_ENABLE_TEST_MODE === 'true';
+const ENABLE_TEST_MODE = TEST_ACCESS_MODE;
 const serviceDateToday = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 };
 
-const DEV_TEST_TRIP_ID = '00000000-0000-4000-8000-000000000004';
-const createDevTestDutySession = () => ({
-  ...DEFAULT_DUTY,
-  driverName: 'GPS Test Driver',
-  driverId: 'DRV-TEST',
-  driverPersonnelId: 'DRV-TEST',
-  conductorName: 'GPS Test Conductor',
-  conductorPersonnelId: 'CND-TEST',
-  plateNumber: 'QC-BUS-0402',
-  busCapacity: 50,
-  tripDirection: 'Northbound',
-  tripId: DEV_TEST_TRIP_ID,
-  serviceDate: serviceDateToday(),
-  testMode: true
-});
+const LEGACY_TEST_TRIP_ID = '00000000-0000-4000-8000-000000000004';
 
 function readDutySession() {
   try {
     const saved = localStorage.getItem('qcbus_duty_session');
-    if (!saved) return ENABLE_TEST_MODE ? createDevTestDutySession() : DEFAULT_DUTY;
+    if (!saved) return DEFAULT_DUTY;
     const session = JSON.parse(saved);
-    if (!ENABLE_TEST_MODE && (session.testMode || session.tripId === DEV_TEST_TRIP_ID)) return DEFAULT_DUTY;
+    if (session.testMode || session.tripId === LEGACY_TEST_TRIP_ID) return DEFAULT_DUTY;
     return {
       ...DEFAULT_DUTY,
       ...session,
       testMode: Boolean(session.testMode),
       // Older sessions stored a non-UUID placeholder here. Let the passenger
       // summary resolve the real active trip from the assigned bus instead.
-      tripId: UUID_PATTERN.test(session?.tripId || '') ? session.tripId : (ENABLE_TEST_MODE ? DEV_TEST_TRIP_ID : null),
-      serviceDate: ENABLE_TEST_MODE ? serviceDateToday() : session.serviceDate,
-      plateNumber: session.plateNumber || (ENABLE_TEST_MODE ? 'QC-BUS-0402' : '')
+      tripId: UUID_PATTERN.test(session?.tripId || '') ? session.tripId : null,
+      serviceDate: session.serviceDate,
+      plateNumber: session.plateNumber || ''
     };
   } catch {
     return DEFAULT_DUTY;
@@ -69,9 +55,9 @@ const DEFAULT_DUTY = {
 
 export function AuthProvider({ children }) {
   const [dutySession, setDutySession] = useState(readDutySession);
-  const [token, setToken] = useState(null);
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [token, setToken] = useState(ENABLE_TEST_MODE ? 'test-access' : null);
+  const [user, setUser] = useState(ENABLE_TEST_MODE ? { id: 'test-access', username: 'Test Administrator', role: 'admin' } : null);
+  const [loading, setLoading] = useState(!ENABLE_TEST_MODE);
   const [locationPermission, setLocationPermission] = useState(null);
 
   // Prompt location permission
@@ -97,6 +83,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   useEffect(() => {
+    if (ENABLE_TEST_MODE) return undefined;
     let active = true;
     const restoreAdminSession = async (session) => {
       if (!session?.user) {
@@ -125,25 +112,11 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = async (sessionDetails = {}) => {
-    if (ENABLE_TEST_MODE) {
-      const testDuty = {
-        ...createDevTestDutySession(),
-        driverId: sessionDetails.driverPersonnelId || 'DRV-TEST',
-        driverPersonnelId: sessionDetails.driverPersonnelId || 'DRV-TEST',
-        conductorPersonnelId: sessionDetails.conductorPersonnelId || 'CND-TEST',
-        plateNumber: sessionDetails.plateNumber || 'QC-BUS-0402',
-        busCapacity: Number(sessionDetails.busCapacity) || 50,
-        tripDirection: sessionDetails.tripDirection || 'Northbound'
-      };
-      localStorage.setItem('qcbus_duty_session', JSON.stringify(testDuty));
-      setDutySession(testDuty);
-      requestLocationPermission();
-      return { success: true, testMode: true };
-    }
-
-    const { data: authData } = await supabase.auth.getSession();
-    if (!authData?.session?.user && !token && user?.role !== 'admin') {
-      throw new Error('No pre-authorized administrator session is available on this bus deployment.');
+    if (!ENABLE_TEST_MODE) {
+      const { data: authData } = await supabase.auth.getSession();
+      if (!authData?.session?.user && !token && user?.role !== 'admin') {
+        throw new Error('No pre-authorized administrator session is available on this bus deployment.');
+      }
     }
     const tripResult = await startDutyTripForBus(sessionDetails);
     if (!tripResult.success) throw new Error(tripResult.error);
@@ -209,8 +182,8 @@ export function AuthProvider({ children }) {
         user,
         dutySession: dutySession || DEFAULT_DUTY,
         updateDutySession,
-        isAuthenticated: !!token && user?.role === 'admin',
-        isTestMode: ENABLE_TEST_MODE && Boolean(dutySession.testMode),
+        isAuthenticated: ENABLE_TEST_MODE || (!!token && user?.role === 'admin'),
+        isTestMode: ENABLE_TEST_MODE,
         isDutyRegistered: dutySession.serviceDate === serviceDateToday()
           && Boolean(dutySession.plateNumber && dutySession.tripId),
         loading,

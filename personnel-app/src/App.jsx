@@ -22,8 +22,7 @@ import { AdminSignupRequestsPage } from './pages/AdminSignupRequestsPage';
 import { useAuth } from './context/AuthContext';
 
 function LoginRoute({ page }) {
-  const { isTestMode } = useAuth();
-  return isTestMode ? <Navigate to="/" replace /> : page;
+  return page;
 }
 
 function AdminPortal() {
