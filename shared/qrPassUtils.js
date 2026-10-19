@@ -124,7 +124,7 @@ export function parsePassengerQRCode(raw) {
         raw: str
       };
     }
-  } catch (_) {}
+  } catch (_) { }
 
   // 2. Formatted Multi-line or Key-Value text
   const tripIdMatch = str.match(/(?:Trip ID|Journey ID|Pass ID|Code):\s*([0-9]{6}-[0-9]{5}|[A-Za-z0-9_-]+)/i);

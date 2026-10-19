@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { generatePDFSummaryReport } from '../services/pdfReportGenerator';
+import { fetchDailyTripSummary } from '../services/supabaseClient';
 import { Navigation, Users, BarChart3, Settings, LogOut, ShieldCheck, Download, AlertTriangle, UserRoundPlus, Clock3, MapPin } from 'lucide-react';
 
 export function Sidebar({ adminMode = false }) {
@@ -20,8 +21,11 @@ export function Sidebar({ adminMode = false }) {
     navigate('/admin-login');
   };
 
-  const handleDownloadTripSummary = () => {
-    generatePDFSummaryReport({ timeframe: 'Day', dutySession });
+  const handleDownloadTripSummary = async () => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const result = await fetchDailyTripSummary({ since: start.toISOString(), dutySession });
+    generatePDFSummaryReport({ timeframe: 'Day', dutySession, summary: result.success ? result.data : {} });
   };
 
   return (

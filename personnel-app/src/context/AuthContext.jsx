@@ -3,11 +3,12 @@
  * Manages duty session details, personnel profile, and access authorization for QC Bus Admin.
  */
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { loginAdmin, logoutAdmin, startDutyTripForBus, supabase } from '../services/supabaseClient';
+import { fetchPassengerRegistry, loginAdmin, logoutAdmin, startDutyTripForBus, startNextTrip, supabase } from '../services/supabaseClient';
 
 const AuthContext = createContext({});
 
 const UUID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+const ENABLE_TEST_MODE = import.meta.env.DEV && import.meta.env.VITE_ENABLE_TEST_MODE === 'true';
 const serviceDateToday = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -32,17 +33,18 @@ const createDevTestDutySession = () => ({
 function readDutySession() {
   try {
     const saved = localStorage.getItem('qcbus_duty_session');
-    if (!saved) return import.meta.env.DEV ? createDevTestDutySession() : DEFAULT_DUTY;
+    if (!saved) return ENABLE_TEST_MODE ? createDevTestDutySession() : DEFAULT_DUTY;
     const session = JSON.parse(saved);
+    if (!ENABLE_TEST_MODE && (session.testMode || session.tripId === DEV_TEST_TRIP_ID)) return DEFAULT_DUTY;
     return {
       ...DEFAULT_DUTY,
       ...session,
-      ...(import.meta.env.DEV ? { testMode: true } : {}),
+      testMode: Boolean(session.testMode),
       // Older sessions stored a non-UUID placeholder here. Let the passenger
       // summary resolve the real active trip from the assigned bus instead.
-      tripId: UUID_PATTERN.test(session?.tripId || '') ? session.tripId : (import.meta.env.DEV ? DEV_TEST_TRIP_ID : null),
-      serviceDate: import.meta.env.DEV ? serviceDateToday() : session.serviceDate,
-      plateNumber: session.plateNumber || (import.meta.env.DEV ? 'QC-BUS-0402' : '')
+      tripId: UUID_PATTERN.test(session?.tripId || '') ? session.tripId : (ENABLE_TEST_MODE ? DEV_TEST_TRIP_ID : null),
+      serviceDate: ENABLE_TEST_MODE ? serviceDateToday() : session.serviceDate,
+      plateNumber: session.plateNumber || (ENABLE_TEST_MODE ? 'QC-BUS-0402' : '')
     };
   } catch {
     return DEFAULT_DUTY;
@@ -123,7 +125,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = async (sessionDetails = {}) => {
-    if (import.meta.env.DEV) {
+    if (ENABLE_TEST_MODE) {
       const testDuty = {
         ...createDevTestDutySession(),
         driverId: sessionDetails.driverPersonnelId || 'DRV-TEST',
@@ -145,6 +147,16 @@ export function AuthProvider({ children }) {
     }
     const tripResult = await startDutyTripForBus(sessionDetails);
     if (!tripResult.success) throw new Error(tripResult.error);
+    let dutyTrip = tripResult.data.trip;
+    const existingRegistry = await fetchPassengerRegistry(dutyTrip.id);
+    if (existingRegistry.success && existingRegistry.data.length > 0) {
+      const freshTrip = await startNextTrip({
+        currentTripId: dutyTrip.id,
+        direction: sessionDetails.tripDirection || 'Northbound'
+      });
+      if (!freshTrip.success) throw new Error(freshTrip.error || 'Unable to start a fresh duty trip.');
+      dutyTrip = freshTrip.data;
+    }
     const newDutySession = {
       driverName: tripResult.data.personnel.driver.full_name,
       driverId: tripResult.data.personnel.driver.personnel_id,
@@ -156,7 +168,7 @@ export function AuthProvider({ children }) {
       plateNumber: tripResult.data.bus.plate_number,
       busCapacity: tripResult.data.bus.capacity,
       tripDirection: sessionDetails.tripDirection || 'Northbound',
-      tripId: tripResult.data.trip.id,
+      tripId: dutyTrip.id,
       serviceDate: serviceDateToday(),
       loginTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
@@ -164,7 +176,7 @@ export function AuthProvider({ children }) {
     localStorage.setItem('qcbus_duty_session', JSON.stringify(newDutySession));
     setDutySession(newDutySession);
     requestLocationPermission();
-    return { success: true, trip: tripResult.data.trip };
+    return { success: true, trip: dutyTrip };
   };
 
   const loginAdminAccount = async (email, password) => {
@@ -198,7 +210,7 @@ export function AuthProvider({ children }) {
         dutySession: dutySession || DEFAULT_DUTY,
         updateDutySession,
         isAuthenticated: !!token && user?.role === 'admin',
-        isTestMode: import.meta.env.DEV && Boolean(dutySession.testMode),
+        isTestMode: ENABLE_TEST_MODE && Boolean(dutySession.testMode),
         isDutyRegistered: dutySession.serviceDate === serviceDateToday()
           && Boolean(dutySession.plateNumber && dutySession.tripId),
         loading,

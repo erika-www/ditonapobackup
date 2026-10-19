@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { CheckCircle, RefreshCw, Users, Camera, ShieldCheck, UserCheck, AlertCircle, MapPin, ChevronDown, ChevronUp } from 'lucide-react';
+import { CheckCircle, RefreshCw, Users, ShieldCheck, UserCheck, AlertCircle, MapPin, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import {
   fetchOngoingTripForBus,
@@ -10,7 +10,6 @@ import {
 } from '../services/supabaseClient';
 import { ROUTE4_STOPS } from '@shared/route4Stops';
 import { parsePassengerQRCode, isPriorityCategory } from '@shared/qrPassUtils';
-import { QrCameraScannerModal } from '../components/QrCameraScannerModal';
 
 const timeLabel = (value) => (value
   ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -26,7 +25,6 @@ export function PassengerCheckInPage() {
   const [busyId, setBusyId] = useState(null);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
-  const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [showStopBreakdown, setShowStopBreakdown] = useState(false);
   const scannerRef = useRef(null);
 
@@ -43,7 +41,7 @@ export function PassengerCheckInPage() {
     fetchOngoingTripForBus(dutySession.plateNumber).then((result) => {
       if (cancelled) return;
       if (result.success && result.data?.id) setTripId(result.data.id);
-      else setError(result.error || `No active trip is assigned to bus ${dutySession.plateNumber}.`);
+      // An idle bus has no passenger scan session yet; keep the page usable without a blocking alert.
     });
     return () => { cancelled = true; };
   }, [dutySession?.plateNumber]);
@@ -121,10 +119,10 @@ export function PassengerCheckInPage() {
         const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - 1) : availablePrioritySeats;
         const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - 1) : availableRegularSeats;
         setNotice(
-          `✓ PASSENGER BOARDED: ${journey.passenger_name || 'Passenger'} (${catName} · ${isPri ? 'Priority /20' : 'Regular /30'}). Decremented ${isPri ? `Priority Seats (now ${remainingPriority}/20)` : `Regular Seats (now ${remainingRegular}/30)`}. Boarded at: ${journey.origin_name || 'Stop 1'} | Alights at: ${journey.destination_name || 'End Stop'}.`
+          `✓ PASSENGER BOARDED (${catName}). Decremented ${isPri ? `Priority Seats (now ${remainingPriority}/20)` : `Regular Seats (now ${remainingRegular}/30)`}. Boarded at: ${journey.origin_name || 'Stop 1'} | Alights at: ${journey.destination_name || 'End Stop'}.`
         );
       } else {
-        setNotice(`✓ PASSENGER ALIGHTED: ${journey.passenger_name || 'Passenger'} alighted at ${journey.destination_name || 'Destination'}. Seat freed.`);
+        setNotice(`✓ PASSENGER ALIGHTED at ${journey.destination_name || 'Destination'}. Seat freed.`);
       }
     }
 
@@ -174,30 +172,28 @@ export function PassengerCheckInPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-      {/* CAMERA QR SCANNER MODAL */}
-      <QrCameraScannerModal
-        isOpen={isCameraOpen}
-        onClose={() => setIsCameraOpen(false)}
-        onScan={processScannedCode}
-        title="Scan Commuter Digital QR Pass"
-      />
-
       {/* TOP SUMMARY CARD */}
-      <section className="card" style={{ background: 'linear-gradient(135deg, rgba(6,182,212,.15), rgba(22,163,74,.15))' }}>
+      <section className="card" style={{ background: '#123b3b' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
           <div>
             <h1 style={{ fontSize: '1.5rem', marginBottom: '.3rem' }}>Passenger Check-in & QR Operations</h1>
-            <p style={{ color: '#94a3b8', margin: 0 }}>
-              Read passenger QR passes, assess category quotas (/20 Priority vs /30 Regular), and track stop passenger flows.
-            </p>
             <p style={{ color: '#94a3b8', margin: '.35rem 0 0' }}>
               Duty bus: <strong>{dutySession?.plateNumber || occupancy?.bus_plate || 'QC-BUS'}</strong> | Assigned Driver: <strong>{dutySession?.driverName}</strong>
             </p>
           </div>
           <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'wrap' }}>
-            <button type="button" onClick={() => setIsCameraOpen(true)} className="btn btn-primary" style={{ padding: '.55rem 1rem', display: 'flex', alignItems: 'center', gap: '.4rem', backgroundColor: '#0284c7' }}>
-              <Camera size={16} /> Open Camera QR Scanner
-            </button>
+            <form onSubmit={handleScanFormSubmit} style={{ display: 'flex', gap: '.4rem' }}>
+              <input
+                ref={scannerRef}
+                name="qr"
+                className="form-input"
+                autoFocus
+                autoComplete="off"
+                placeholder="USB scanner ready"
+                aria-label="USB QR barcode scanner input"
+                style={{ width: '14rem', padding: '.45rem .6rem' }}
+              />
+            </form>
             <button type="button" onClick={refresh} className="btn btn-secondary">
               <RefreshCw size={14} /> Refresh
             </button>
@@ -217,9 +213,6 @@ export function PassengerCheckInPage() {
             <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#fef08a' }}>
               {availablePrioritySeats} <span style={{ fontSize: '1rem', color: '#94a3b8' }}>/ 20</span>
             </div>
-            <span style={{ fontSize: '.72rem', color: '#94a3b8' }}>
-              Senior Citizen · PWD · Pregnant
-            </span>
           </div>
 
           {/* Metric 2: Available Regular Seats (/30) */}
@@ -233,9 +226,6 @@ export function PassengerCheckInPage() {
             <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#e0f2fe' }}>
               {availableRegularSeats} <span style={{ fontSize: '1rem', color: '#94a3b8' }}>/ 30</span>
             </div>
-            <span style={{ fontSize: '.72rem', color: '#94a3b8' }}>
-              Regular & Student Commuters
-            </span>
           </div>
 
           {/* Metric 3: Total Onboard */}
@@ -246,9 +236,6 @@ export function PassengerCheckInPage() {
             <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#10b981' }}>
               {totalOnboard} <span style={{ fontSize: '1rem', color: '#94a3b8' }}>/ 50 Capacity</span>
             </div>
-            <span style={{ fontSize: '.72rem', color: '#94a3b8' }}>
-              {priorityBoarded} Priority + {regularBoarded} Regular
-            </span>
           </div>
 
           {/* Metric 4: Total Registered Passes */}
@@ -259,48 +246,12 @@ export function PassengerCheckInPage() {
             <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#f8fafc' }}>
               {registry.length} Passes
             </div>
-            <span style={{ fontSize: '.72rem', color: '#94a3b8' }}>
-              Daily recorded passenger passes
-            </span>
           </div>
         </div>
       </section>
 
       {notice && <div className="alert alert-success" style={{ padding: '.85rem 1rem', fontSize: '.9rem', lineHeight: 1.4 }}>{notice}</div>}
       {error && <div className="alert alert-danger" style={{ padding: '.85rem 1rem', fontSize: '.9rem', lineHeight: 1.4 }}>{error}</div>}
-
-      {/* QUICK HARDWARE SCANNER / MANUAL INPUT BAR */}
-      <form className="card" onSubmit={handleScanFormSubmit}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.5rem' }}>
-          <h2 style={{ fontSize: '1.1rem', margin: 0 }}>QR Scanner Input</h2>
-          <button
-            type="button"
-            onClick={() => setIsCameraOpen(true)}
-            className="btn btn-secondary"
-            style={{ fontSize: '.8rem', padding: '.35rem .75rem', display: 'flex', alignItems: 'center', gap: '.35rem' }}
-          >
-            <Camera size={14} /> Open Camera Scanner
-          </button>
-        </div>
-        <p style={{ color: '#94a3b8', fontSize: '.85rem', marginBottom: '.75rem' }}>
-          Ready for barcode scan gun or keyboard entry. Scan a pass once to register <strong>Boarding</strong> (decrements category seat quota and increments stop boarded count). Scan that pass again to register <strong>Alighting</strong> (restores seat and updates alighting count).
-        </p>
-        <div style={{ display: 'flex', gap: '.5rem' }}>
-          <input
-            ref={scannerRef}
-            name="qr"
-            autoComplete="off"
-            autoFocus
-            aria-label="QR scanner input"
-            placeholder="Scan pass with barcode gun or paste pass text / JSON..."
-            className="form-input"
-            style={{ flex: 1 }}
-          />
-          <button type="submit" className="btn btn-primary" style={{ padding: '.55rem 1.25rem' }}>
-            Process Scan
-          </button>
-        </div>
-      </form>
 
       {/* STOP PASSENGER BREAKDOWN ACCORDION */}
       <section className="card">

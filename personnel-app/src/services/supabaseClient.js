@@ -608,22 +608,10 @@ export async function startDutyTripForBus({ plateNumber, busCapacity, driverPers
       } catch (_) {}
     }
 
-    // 4. Safe operational trip fallback if database is offline or RLS restricted
+    // Never manufacture a local trip ID. Passenger registration requires a
+    // real ongoing database trip so every count belongs to the correct run.
     if (!trip) {
-      const generatedTripId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `00000000-0000-4000-8000-${Date.now().toString(16).padStart(12, '0')}`;
-
-      trip = {
-        id: generatedTripId,
-        bus_id: bus.id,
-        route_id: route.id,
-        status: 'ongoing',
-        started_at: new Date().toISOString(),
-        driver_personnel_id: driver.personnel_id,
-        conductor_personnel_id: conductor.personnel_id,
-        dispatcher_personnel_id: dispatcher?.personnel_id || null
-      };
+      throw new Error('Unable to create an ongoing database trip for this duty session.');
     }
 
     return { success: true, data: { bus, route, trip, personnel: { driver, conductor, dispatcher } } };
@@ -651,7 +639,7 @@ export async function fetchPassengerRegistry(tripId) {
     const { data, error } = await supabase
       .from('passenger_journeys')
       .select('*, profiles:profiles(full_name,email)')
-      .or(`trip_id.eq.${tripId},trip_id.is.null`)
+      .eq('trip_id', tripId)
       .order('created_at', { ascending: true });
     if (error) throw error;
 
@@ -681,6 +669,7 @@ export async function fetchPassengerRegistry(tripId) {
       success: true,
       data: journeys.map((journey) => ({
         ...journey,
+        count: Math.max(1, Number(journey.passenger_count) || 1),
         trips: { buses: { plate_number: plateByTrip.get(journey.trip_id) || null } }
       }))
     };
@@ -696,14 +685,14 @@ export async function fetchJourneyByQrToken(token) {
 
     // First attempt: search by qr_token or id
     let { data, error } = await supabase.from('passenger_journeys')
-      .select('id,trip_id,passenger_id,status,passenger_name,origin_name,destination_name,created_at,profiles:profiles(full_name,passenger_category)')
+      .select('id,trip_id,passenger_id,status,passenger_name,passenger_category,passenger_count,companions,origin_name,destination_name,created_at,profiles:profiles(full_name,passenger_category)')
       .or(`qr_token.eq."${searchToken}",id.eq."${searchToken}",qr_token.eq."${token}"`)
       .maybeSingle();
 
     if (!data && parsed?.tripId) {
       // Check if maybe stored with raw string
       const rawTry = await supabase.from('passenger_journeys')
-        .select('id,trip_id,passenger_id,status,passenger_name,origin_name,destination_name,created_at,profiles:profiles(full_name,passenger_category)')
+        .select('id,trip_id,passenger_id,status,passenger_name,passenger_category,passenger_count,companions,origin_name,destination_name,created_at,profiles:profiles(full_name,passenger_category)')
         .eq('qr_token', parsed.tripId).maybeSingle();
       if (rawTry.data) data = rawTry.data;
     }
@@ -718,7 +707,7 @@ export async function fetchJourneyByQrToken(token) {
           is_priority: isPriorityCategory(cat),
           origin_name: data.origin_name || parsed?.boardingStop || '',
           destination_name: data.destination_name || parsed?.destinationStop || '',
-          count: parsed?.count || 1,
+          count: Math.max(1, Number(data.passenger_count || parsed?.count) || 1),
           parsed
         }
       };
@@ -764,6 +753,101 @@ export async function fetchBoardingEventCounts(since) {
       }, { boarded: 0, alighted: 0 })
     };
   } catch (err) { return { success: false, error: err.message }; }
+}
+
+/** Fetch the authoritative day summary from recorded events and the assigned duty personnel. */
+export async function fetchDailyTripSummary({ since, dutySession } = {}) {
+  try {
+    let busId = null;
+    if (dutySession?.plateNumber) {
+      const { data: bus, error: busError } = await supabase
+        .from('buses')
+        .select('id')
+        .eq('plate_number', dutySession.plateNumber)
+        .maybeSingle();
+      if (busError) throw busError;
+      busId = bus?.id || null;
+    }
+
+    let eventsQuery = supabase
+      .from('boarding_events')
+      .select('trip_id,bus_id,journey_id,event_type,created_at,is_reversed')
+      .eq('is_reversed', false)
+      .gte('created_at', since)
+      .order('created_at', { ascending: true });
+    if (busId) eventsQuery = eventsQuery.eq('bus_id', busId);
+    if (!busId && dutySession?.tripId) eventsQuery = eventsQuery.eq('trip_id', dutySession.tripId);
+    const { data: events, error: eventsError } = await eventsQuery;
+    if (eventsError) throw eventsError;
+
+    const journeyIds = [...new Set((events || []).map((event) => event.journey_id).filter(Boolean))];
+    let journeys = [];
+    if (journeyIds.length) {
+      const result = await supabase.from('passenger_journeys')
+        .select('id,origin_name,destination_name,passenger_count,companions')
+        .in('id', journeyIds);
+      if (result.error) throw result.error;
+      journeys = result.data || [];
+    }
+    const journeyById = new Map(journeys.map((journey) => [journey.id, journey]));
+    const stopMap = new Map(ROUTE4_STOPS.map((stop) => [
+      stop.name,
+      { stopName: stop.name, boarded: 0, alighted: 0, total: 0, lastEventAt: null }
+    ]));
+    (events || []).forEach((event) => {
+      const journey = journeyById.get(event.journey_id);
+      const stopName = event.event_type === 'board' ? journey?.origin_name : journey?.destination_name;
+      if (!stopName) return;
+      const row = stopMap.get(stopName) || { stopName, boarded: 0, alighted: 0, total: 0, lastEventAt: null };
+      const passengers = Math.max(1, Number(journey?.passenger_count) || (1 + Number(journey?.companions || 0)));
+      if (event.event_type === 'board') row.boarded += passengers;
+      if (event.event_type === 'alight') row.alighted += passengers;
+      row.lastEventAt = event.created_at;
+      stopMap.set(stopName, row);
+    });
+    let onboard = 0;
+    const orderByName = new Map(ROUTE4_STOPS.map((stop, index) => [stop.name, index]));
+    const stopRows = [...stopMap.values()].sort((a, b) => {
+      const left = orderByName.get(a.stopName) ?? Number.MAX_SAFE_INTEGER;
+      const right = orderByName.get(b.stopName) ?? Number.MAX_SAFE_INTEGER;
+      return left - right;
+    }).map((row) => {
+      onboard = Math.max(0, onboard + row.boarded - row.alighted);
+      return { ...row, total: onboard };
+    });
+
+    const personnelIds = [dutySession?.driverPersonnelId, dutySession?.conductorPersonnelId, dutySession?.dispatcherPersonnelId].filter(Boolean);
+    let personnel = [];
+    if (personnelIds.length) {
+      const result = await supabase.from('operations_personnel')
+        .select('personnel_id,full_name,personnel_type').in('personnel_id', personnelIds);
+      if (result.error) throw result.error;
+      personnel = result.data || [];
+    }
+    const byType = (type, fallback) => personnel.find((person) => person.personnel_type === type)?.full_name || dutySession?.[`${type}Name`] || fallback;
+    const tripIds = [...new Set((events || []).map((event) => event.trip_id).filter(Boolean))];
+    return {
+      success: true,
+      data: {
+        events: events || [],
+        stops: stopRows,
+        totals: {
+          boarded: (events || []).filter((event) => event.event_type === 'board').length,
+          alighted: (events || []).filter((event) => event.event_type === 'alight').length,
+          passengersBoarded: stopRows.reduce((sum, row) => sum + row.boarded, 0),
+          passengersAlighted: stopRows.reduce((sum, row) => sum + row.alighted, 0)
+        },
+        tripIds,
+        driverName: byType('driver', 'Not assigned'),
+        conductorName: byType('conductor', 'Not assigned'),
+        dispatcherName: byType('dispatcher', 'Not assigned'),
+        plateNumber: dutySession?.plateNumber || 'Not assigned',
+        serviceDate: dutySession?.serviceDate || new Date().toISOString().slice(0, 10)
+      }
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 }
 
 export async function fetchOngoingTripForBus(plateNumber) {
@@ -822,20 +906,40 @@ export async function publishCurrentBusLocation(busId, position) {
   }
 }
 
-export async function createManualPassengerJourney({ passengerName, origin, destination, tripId }) {
+export async function createManualPassengerJourney({ passengerName, passengerCategory, origin, destination, tripId, routeDirection }) {
   try {
     const { data, error } = await supabase
       .from('passenger_journeys')
       .insert({
         passenger_name: passengerName.trim(),
+        passenger_category: passengerCategory || 'Regular',
+        passenger_count: 1,
+        companions: 0,
         registration_source: 'admin',
         origin_name: origin,
         destination_name: destination,
         trip_id: tripId,
+        route_direction: routeDirection || 'Northbound',
         status: 'planned'
       })
       .select('*')
       .single();
+    if (error) throw error;
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function startNextTrip({ currentTripId, direction }) {
+  try {
+    if (!currentTripId) throw new Error('An ongoing trip is required.');
+    const operationId = `next-trip-${currentTripId}-${Date.now()}`;
+    const { data, error } = await supabase.rpc('start_next_trip', {
+      p_operation_id: operationId,
+      p_trip_id: currentTripId,
+      p_direction: direction
+    });
     if (error) throw error;
     return { success: true, data };
   } catch (err) {

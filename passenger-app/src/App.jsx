@@ -95,6 +95,7 @@ export function AppContent() {
 
   // Auth trigger source: 'NAVBAR' | 'START_TRIP'
   const [dashboardTab, setDashboardTab] = useState('home');
+  const [startTripRequestId, setStartTripRequestId] = useState(0);
 
   const handleOpenAuthFromNavbar = () => {
     setDashboardTab('profile');
@@ -113,6 +114,7 @@ export function AppContent() {
 
   const handleStartTripClick = () => {
     setDashboardTab('home');
+    setStartTripRequestId((current) => current + 1);
     setInTripDashboard(true);
   };
 
@@ -157,6 +159,7 @@ export function AppContent() {
 
             <StartTripInterface
               initialTab={dashboardTab}
+              startTripRequestId={startTripRequestId}
               currentUser={currentUser}
               onUpdateCategory={handleUpdateCategory}
               onLogout={handleLogout}

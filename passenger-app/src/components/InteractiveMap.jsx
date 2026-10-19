@@ -7,7 +7,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import { MapPin, Navigation, Compass, Plus, CheckCircle, Crosshair, Map as MapIcon, WifiOff } from 'lucide-react';
-import { findNearestStop, formatDistance, estimateWalkingTimeMins } from '../utils/geoUtils';
+import { findNearestStop, formatDistance, estimateWalkingTimeMins, calculateDistanceMeters } from '../utils/geoUtils';
 import { QC_ROUTES } from '../mockData';
 import { ROUTE4_STOPS } from '@shared/route4Stops';
 import { fetchConfiguredRoute4Stops } from '../services/supabaseClient';
@@ -24,6 +24,7 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
   const [isLocating, setIsLocating] = useState(false);
   const [stopsList, setStopsList] = useState(ROUTE4_STOPS.map((s, idx) => ({ ...s, stopNumber: idx + 1, routeCode: 'R4', routeName: 'Route 4: QC Hall to General Luis' })));
   const [nearestStopInfo, setNearestStopInfo] = useState(null);
+  const [busCurrentStop, setBusCurrentStop] = useState(null);
 
   // Custom GPS Feeding Form State
   const [customLat, setCustomLat] = useState('14.65022');
@@ -203,9 +204,27 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
     `);
 
     // 2. Real-time Live Bus Marker
-    if (liveBusCoords) {
-      const busPos = liveBusCoords;
+    if (liveBusCoords && Number.isFinite(Number(liveBusCoords.lat)) && Number.isFinite(Number(liveBusCoords.lng))) {
+      const busPos = {
+        lat: Number(liveBusCoords.lat),
+        lng: Number(liveBusCoords.lng),
+        speed: liveBusCoords.speed
+      };
       const busIconColor = isSignalLost ? '#ef4444' : '#10b981';
+
+      // Proximity detection for bus at stops within 5-meter radius
+      let arrivedStop = null;
+      let minStopDistM = Infinity;
+      for (const st of stopsList) {
+        if (Number.isFinite(Number(st.lat)) && Number.isFinite(Number(st.lng))) {
+          const dM = calculateDistanceMeters(busPos.lat, busPos.lng, Number(st.lat), Number(st.lng));
+          if (dM <= 5 && dM < minStopDistM) {
+            arrivedStop = st;
+            minStopDistM = dM;
+          }
+        }
+      }
+      setBusCurrentStop(arrivedStop);
 
       const liveBusIcon = L.divIcon({
         className: 'custom-bus-marker',
@@ -220,14 +239,20 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
       });
 
       const busMarker = L.marker([busPos.lat, busPos.lng], { icon: liveBusIcon }).addTo(layerGroup);
+      const isTargetTerminal = arrivedStop && arrivedStop.stopNumber === 15;
       busMarker.bindPopup(`
-        <div style="font-family: sans-serif; font-size: 13px; color: #0f172a;">
-          <strong style="color: ${busIconColor};">🚌 ${liveBusPlate || 'QC Bus Route 4'}</strong><br/>
-          ${isSignalLost ? '<span style="color: #ef4444; font-weight: 700;">⚠️ Stale GPS</span>' : '<span style="color: #10b981; font-weight: 700;">🟢 Live Signal Active</span>'}<br/>
-          Speed: ${Number.isFinite(busPos.speed) ? busPos.speed.toFixed(1) + ' km/h' : 'In Service'}<br/>
-          Updated: ${lastUpdatedSecondsAgo !== undefined ? lastUpdatedSecondsAgo + 's ago' : 'Just now'}
+        <div style="font-family: sans-serif; font-size: 13px; color: #0f172a; min-width: 190px;">
+          <strong style="color: ${busIconColor}; font-size: 14px;">🚌 ${liveBusPlate || 'QC Bus Route 4'}</strong><br/>
+          ${isSignalLost ? '<span style="color: #ef4444; font-weight: 700;">⚠️ Stale Signal</span>' : '<span style="color: #10b981; font-weight: 700;">🟢 Live In-Motion Signal</span>'}<br/>
+          Speed: ${Number.isFinite(busPos.speed) ? busPos.speed.toFixed(1) + ' km/h' : 'Moving'}<br/>
+          ${arrivedStop ? `<div style="margin-top: 4px; padding: 3px 6px; border-radius: 4px; background: ${isTargetTerminal ? '#fef3c7' : '#dcfce7'}; color: ${isTargetTerminal ? '#b45309' : '#15803d'}; font-weight: 700;">
+            ${isTargetTerminal ? '🏁 At Target Destination: ' : '📍 Arrived at Stop '} ${arrivedStop.stopNumber}: ${arrivedStop.name} (within 5m)
+          </div>` : ''}
+          <span style="font-size: 11px; color: #64748b;">Updated: ${lastUpdatedSecondsAgo !== undefined ? lastUpdatedSecondsAgo + 's ago' : 'Just now'}</span>
         </div>
       `);
+    } else {
+      setBusCurrentStop(null);
     }
 
     // 3. Numbered Stop Markers strictly (1 to 15)
@@ -386,6 +411,22 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
         </div>
 
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          {liveBusCoords && Number.isFinite(Number(liveBusCoords.lat)) && (
+            <button
+              type="button"
+              onClick={() => {
+                if (mapInstanceRef.current) {
+                  mapInstanceRef.current.setView([Number(liveBusCoords.lat), Number(liveBusCoords.lng)], 16);
+                  if (onShowToast) onShowToast(`Centered map on Bus (${liveBusPlate || 'Live Bus'})`);
+                }
+              }}
+              className="btn-secondary"
+              style={{ fontSize: '0.8rem', padding: '0.4rem 0.8rem', display: 'flex', alignItems: 'center', gap: '0.35rem', borderColor: '#10b981', color: '#059669', fontWeight: 600 }}
+              title="Focus map on live moving vehicle"
+            >
+              <Navigation size={14} /> Center Bus
+            </button>
+          )}
           <button
             type="button"
             onClick={handleLocateMe}
@@ -406,6 +447,32 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
           </button>
         </div>
       </div>
+
+      {/* 5-Meter Stop / Target Destination Proximity Notification */}
+      {busCurrentStop && (
+        <div style={{
+          backgroundColor: busCurrentStop.stopNumber === 15 ? 'rgba(234, 179, 8, 0.15)' : 'rgba(16, 185, 129, 0.12)',
+          border: `1.5px solid ${busCurrentStop.stopNumber === 15 ? '#eab308' : '#10b981'}`,
+          borderRadius: 'var(--radius-md)',
+          padding: '0.75rem 1rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+          animation: 'fadeIn 0.3s ease-in-out'
+        }}>
+          <span style={{ fontSize: '1.4rem' }}>
+            {busCurrentStop.stopNumber === 15 ? '🏁' : '📍'}
+          </span>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: '0.95rem', color: busCurrentStop.stopNumber === 15 ? '#854d0e' : '#065f46' }}>
+              {busCurrentStop.stopNumber === 15 ? 'TARGET DESTINATION REACHED' : `BUS ARRIVED AT STOP #${busCurrentStop.stopNumber}`} (Within 5m Radius)
+            </div>
+            <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+              Bus is currently at <strong>{busCurrentStop.name}</strong>. Doors opening for passenger boarding/alighting.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Nearest Stop Smart Advisory Box */}
       {nearestStopInfo && (

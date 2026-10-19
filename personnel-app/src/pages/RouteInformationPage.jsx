@@ -3,7 +3,7 @@
  * Bus Admin / Conductor live route information dashboard featuring:
  * - Direction-dependent stop arrangement with Northbound/Southbound controls
  * - Real-time seat availability (/20 Priority vs /30 Regular)
- * - Live QR scanner integration (camera + manual) assessing category & updating stop passenger counts
+ * - Live USB/RS232-TTL QR scanner integration assessing category & updating stop passenger counts
  * - Per-stop boarded & alighting counters across all 15 Route 4 stops
  * - Automatic GPS arrival detection triggering manual registration
  */
@@ -16,14 +16,23 @@ import {
   createManualPassengerJourney,
   recordBoardingEvent,
   fetchJourneyByQrToken,
-  publishCurrentBusLocation
+  publishCurrentBusLocation,
+  startDutyTripForBus,
+  startNextTrip,
+  supabase
 } from '../services/supabaseClient';
+import {
+  sendDirectionToBridge,
+  endTripOnBridge,
+  fetchBridgeStatus,
+  fetchLatestBridgeGps
+} from '../services/busAnnouncerBridge';
 import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, applyRoute4CoordinateOverrides } from '@shared/route4Stops';
 import { parsePassengerQRCode, isPriorityCategory } from '@shared/qrPassUtils';
-import { QrCameraScannerModal } from '../components/QrCameraScannerModal';
 import {
   Users, MapPin, ArrowUp, ArrowDown, Play, Pause,
-  RotateCcw, AlertCircle, Camera, ShieldCheck, UserCheck
+  RotateCcw, AlertCircle, ShieldCheck, UserCheck,
+  Volume2, VolumeX
 } from 'lucide-react';
 
 export function RouteInformationPage() {
@@ -40,6 +49,22 @@ export function RouteInformationPage() {
   // Direction State (Northbound vs Southbound)
   const [direction, setDirection] = useState(dutySession.tripDirection || 'Northbound');
   const [routeStops, setRouteStops] = useState(ROUTE4_STOPS);
+
+  // Pi 3B Bus Announcer Connection State
+  const [announcerInfo, setAnnouncerInfo] = useState({ online: false, checking: true, lastCheck: null });
+
+  useEffect(() => {
+    let active = true;
+    const checkBridge = async () => {
+      const res = await fetchBridgeStatus();
+      if (active) {
+        setAnnouncerInfo({ online: Boolean(res.online), checking: false, lastCheck: Date.now() });
+      }
+    };
+    checkBridge();
+    const timer = setInterval(checkBridge, 6000);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
 
   // Dynamic Stops list according to direction
   const [stopsList, setStopsList] = useState(direction === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS : routeStops);
@@ -68,26 +93,26 @@ export function RouteInformationPage() {
 
   // Current stop index & Trip movement state
   const [currentStopIndex, setCurrentStopIndex] = useState(0);
-  const [isTripActive, setIsTripActive] = useState(Boolean(dutySession.tripId));
+  const [isTripActive, setIsTripActive] = useState(false);
   const [tripCount, setTripCount] = useState(1);
   const [statusMessage, setStatusMessage] = useState(null);
   const testRegistryKey = `qcbus_test_registry_${dutySession.tripId || 'local'}_${new Date().toISOString().slice(0, 10)}`;
   const tripSegmentKey = `${testRegistryKey}_started_at`;
   const [tripSegmentStartedAt, setTripSegmentStartedAt] = useState(() => Number(localStorage.getItem(tripSegmentKey)) || 0);
   const [passengerRegistry, setPassengerRegistry] = useState(() => {
+    if (!isTestMode) return [];
     try { return JSON.parse(localStorage.getItem(testRegistryKey) || '[]'); } catch { return []; }
   });
-  const [operationalTripId, setOperationalTripId] = useState(dutySession.tripId || null);
+  const [operationalTripId, setOperationalTripId] = useState(null);
 
   // Manual Registration State
   const [showManualRegistration, setShowManualRegistration] = useState(false);
-  const [manualPassengerName, setManualPassengerName] = useState('');
   const [manualPassengerCategory, setManualPassengerCategory] = useState('Regular');
   const [manualDestination, setManualDestination] = useState('');
   const [manualRegistrationBusy, setManualRegistrationBusy] = useState(false);
+  const manualSubmissionRef = useRef(false);
 
-  // Camera QR Scanner State
-  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const scannerInputRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -97,14 +122,17 @@ export function RouteInformationPage() {
         const trip = await fetchOngoingTripForBus(dutySession.plateNumber);
         tripId = trip.success ? trip.data?.id : null;
       }
-      tripId = tripId || dutySession.tripId || operationalTripId;
-      if (!tripId) return;
+      if (!tripId) {
+        if (!cancelled && !isTripActive) {
+          setOperationalTripId(null);
+          setPassengerRegistry([]);
+        }
+        return;
+      }
       const result = await fetchPassengerRegistry(tripId);
       if (!cancelled && result.success && !isTestMode) {
         setOperationalTripId(tripId);
-        setPassengerRegistry(tripSegmentStartedAt
-          ? result.data.filter((journey) => new Date(journey.created_at || journey.boarded_at || 0).getTime() >= tripSegmentStartedAt)
-          : result.data);
+        setPassengerRegistry(result.data);
       }
     };
     refreshRegistry();
@@ -152,58 +180,191 @@ export function RouteInformationPage() {
 
   // Match GPS fixes against every stop so missed or out-of-order arrivals can recover.
   const lastTriggeredStopRef = useRef(null);
+  const busIdRef = useRef(null);
+  const ARRIVAL_RADIUS_METERS = 5; // 5-meter radius trigger for all stops & target destination
+
+  const ensureOperationalTrip = async () => {
+    if (dutySession.plateNumber) {
+      const ongoing = await fetchOngoingTripForBus(dutySession.plateNumber);
+      if (ongoing.success && ongoing.data?.id) {
+        setOperationalTripId(ongoing.data.id);
+        return ongoing.data.id;
+      }
+    }
+
+    const started = await startDutyTripForBus({
+      plateNumber: dutySession.plateNumber,
+      busCapacity: dutySession.busCapacity || 50,
+      driverPersonnelId: dutySession.driverPersonnelId,
+      conductorPersonnelId: dutySession.conductorPersonnelId,
+      dispatcherPersonnelId: dutySession.dispatcherPersonnelId
+    });
+    if (!started.success || !started.data?.trip?.id) {
+      throw new Error(started.error || 'Unable to start an ongoing database trip.');
+    }
+    const tripId = started.data.trip.id;
+    setOperationalTripId(tripId);
+    updateDutySession({ tripId });
+    return tripId;
+  };
+
+  const resolveBusId = async () => {
+    if (busIdRef.current) return busIdRef.current;
+    const plate = dutySession.plateNumber || 'QC-BUS-0402';
+
+    // 1. Check ongoing trip
+    try {
+      const ongoing = await fetchOngoingTripForBus(plate);
+      if (ongoing.success && ongoing.data?.bus_id) {
+        busIdRef.current = ongoing.data.bus_id;
+        if (ongoing.data.id && !operationalTripId) {
+          setOperationalTripId(ongoing.data.id);
+        }
+        return ongoing.data.bus_id;
+      }
+    } catch (_) {}
+
+    // 2. Check bus by plate number
+    try {
+      const { data: bus } = await supabase.from('buses')
+        .select('id').eq('plate_number', plate).maybeSingle();
+      if (bus?.id) {
+        busIdRef.current = bus.id;
+        return bus.id;
+      }
+    } catch (_) {}
+
+    // 3. Ensure duty trip is started for bus
+    try {
+      const started = await startDutyTripForBus({
+        plateNumber: plate,
+        busCapacity: dutySession.busCapacity || 50,
+        driverPersonnelId: dutySession.driverPersonnelId,
+        conductorPersonnelId: dutySession.conductorPersonnelId,
+        dispatcherPersonnelId: dutySession.dispatcherPersonnelId
+      });
+      if (started.success && started.data?.bus?.id) {
+        busIdRef.current = started.data.bus.id;
+        if (started.data.trip?.id) setOperationalTripId(started.data.trip.id);
+        return started.data.bus.id;
+      }
+    } catch (_) {}
+
+    // 4. Fallback to any active bus
+    try {
+      const { data: fallbackBus } = await supabase.from('buses')
+        .select('id').eq('status', 'active').limit(1).maybeSingle();
+      if (fallbackBus?.id) {
+        busIdRef.current = fallbackBus.id;
+        return fallbackBus.id;
+      }
+    } catch (_) {}
+
+    return null;
+  };
+
+  // Helper to broadcast moving vehicle GPS to Supabase so passenger app updates in real-time
+  const broadcastBusGps = async (latitude, longitude, speed, heading, accuracy) => {
+    let bId = busIdRef.current;
+    if (!bId) {
+      bId = await resolveBusId();
+    }
+    if (!bId) return;
+
+    return publishCurrentBusLocation(bId, {
+      latitude,
+      longitude,
+      speed: speed == null ? null : speed,
+      heading: heading == null ? null : heading,
+      accuracy: accuracy == null ? null : accuracy
+    });
+  };
 
   const triggerArrivalAtStop = (stopIdx) => {
     if (stopIdx < 0 || stopIdx >= stopsList.length) return;
     const targetStop = stopsList[stopIdx];
+    const isTargetDestination = stopIdx === stopsList.length - 1;
     setCurrentStopIndex(stopIdx);
+    if (!isTripActive) {
+      setStatusMessage('Start the trip before registering passengers at a stop.');
+      return;
+    }
     setShowManualRegistration(true);
     setManualDestination(stopsList[stopIdx + 1]?.name || '');
-    setStatusMessage(`📍 Bus arrived at Stop ${stopIdx + 1} (${targetStop.name}). Manual passenger registration opened.`);
+    setStatusMessage(isTargetDestination
+      ? `🏁 TARGET DESTINATION REACHED: Stop ${stopIdx + 1} (${targetStop.name}) within 5m radius!`
+      : `📍 Bus arrived at Stop ${stopIdx + 1} (${targetStop.name}) within 5m radius. Registration modal opened.`);
     lastTriggeredStopRef.current = targetStop.id || stopIdx;
+
+    // Immediately reflect vehicle location at arrived stop to Supabase so passenger app live map & destination detector trigger
+    if (Number.isFinite(Number(targetStop.lat)) && Number.isFinite(Number(targetStop.lng))) {
+      broadcastBusGps(Number(targetStop.lat), Number(targetStop.lng), 0, null, 2);
+    }
   };
 
   useEffect(() => {
-    if (!isTripActive || !navigator.geolocation) return undefined;
-    let cancelled = false;
-    let busId = null;
-    let locationPublishWarningShown = false;
+    resolveBusId();
+  }, [dutySession.plateNumber]);
 
-    if (!isTestMode && dutySession.plateNumber) {
-      fetchOngoingTripForBus(dutySession.plateNumber).then((result) => {
-        if (cancelled) return;
-        if (result.success && result.data?.bus_id) {
-          busId = result.data.bus_id;
-          return;
+  useEffect(() => {
+    if (!isTripActive) return undefined;
+    let cancelled = false;
+
+    const toRadians = (degrees) => degrees * Math.PI / 180;
+
+    // 1. Device GPS Watcher
+    let watchId = null;
+    if (navigator.geolocation) {
+      watchId = navigator.geolocation.watchPosition((position) => {
+        const pLat = position.coords.latitude;
+        const pLng = position.coords.longitude;
+        const speedKmh = position.coords.speed == null ? null : position.coords.speed * 3.6;
+
+        broadcastBusGps(pLat, pLng, speedKmh, position.coords.heading, position.coords.accuracy);
+
+        let arrivalStopIndex = -1;
+        let closestDistanceMeters = Infinity;
+
+        for (let index = 0; index < stopsList.length; index += 1) {
+          const stopLat = Number(stopsList[index].lat);
+          const stopLng = Number(stopsList[index].lng);
+          if (!Number.isFinite(stopLat) || !Number.isFinite(stopLng)) continue;
+
+          const latDelta = toRadians(stopLat - pLat);
+          const lngDelta = toRadians(stopLng - pLng);
+          const haversine = Math.sin(latDelta / 2) ** 2
+            + Math.cos(toRadians(pLat)) * Math.cos(toRadians(stopLat)) * Math.sin(lngDelta / 2) ** 2;
+          const distanceMeters = 6371000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+
+          if (distanceMeters <= ARRIVAL_RADIUS_METERS && distanceMeters < closestDistanceMeters) {
+            arrivalStopIndex = index;
+            closestDistanceMeters = distanceMeters;
+          }
         }
-        setStatusMessage(result.success
-          ? 'Live GPS is not being shared: no ongoing trip is assigned to this bus.'
-          : `Live GPS could not be shared: ${result.error}`);
+
+        if (arrivalStopIndex < 0) return;
+        const arrivalStopKey = stopsList[arrivalStopIndex].id || arrivalStopIndex;
+        if (lastTriggeredStopRef.current !== arrivalStopKey) {
+          lastTriggeredStopRef.current = arrivalStopKey;
+          triggerArrivalAtStop(arrivalStopIndex);
+        }
+      }, (error) => setStatusMessage(`Waiting for bus location: ${error.message}`), {
+        enableHighAccuracy: true, maximumAge: 2000, timeout: 15000
       });
     }
 
-    const watchId = navigator.geolocation.watchPosition((position) => {
-      const pLat = position.coords.latitude;
-      const pLng = position.coords.longitude;
-      if (busId && !isTestMode) {
-        publishCurrentBusLocation(busId, {
-          latitude: pLat,
-          longitude: pLng,
-          speed: position.coords.speed == null ? null : position.coords.speed * 3.6,
-          heading: position.coords.heading,
-          accuracy: position.coords.accuracy
-        }).then((result) => {
-          if (cancelled || result.success || locationPublishWarningShown) return;
-          locationPublishWarningShown = true;
-          setStatusMessage(`Live GPS could not be shared: ${result.error}`);
-        });
-      }
+    // 2. Hardware Bridge GPS Poller from Pi 3B / Pi 4B bridge
+    const bridgeGpsTimer = setInterval(async () => {
+      if (cancelled || !isTripActive) return;
+      const fix = await fetchLatestBridgeGps();
+      if (!fix || !fix.fix || fix.latitude == null || fix.longitude == null) return;
 
-      const toRadians = (degrees) => degrees * Math.PI / 180;
-      const gpsAccuracyMeters = Number(position.coords.accuracy);
-      const arrivalRadiusMeters = Number.isFinite(gpsAccuracyMeters)
-        ? Math.max(250, Math.min(gpsAccuracyMeters, 300))
-        : 250;
+      const pLat = fix.latitude;
+      const pLng = fix.longitude;
+
+      // Broadcast hardware GPS from vehicle to Supabase
+      broadcastBusGps(pLat, pLng, fix.speed, fix.heading, fix.accuracy);
+
       let arrivalStopIndex = -1;
       let closestDistanceMeters = Infinity;
 
@@ -218,28 +379,29 @@ export function RouteInformationPage() {
           + Math.cos(toRadians(pLat)) * Math.cos(toRadians(stopLat)) * Math.sin(lngDelta / 2) ** 2;
         const distanceMeters = 6371000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
 
-        if (distanceMeters <= arrivalRadiusMeters && distanceMeters < closestDistanceMeters) {
+        if (distanceMeters <= ARRIVAL_RADIUS_METERS && distanceMeters < closestDistanceMeters) {
           arrivalStopIndex = index;
           closestDistanceMeters = distanceMeters;
         }
       }
 
-      if (arrivalStopIndex < 0) return;
-      const arrivalStopKey = stopsList[arrivalStopIndex].id || arrivalStopIndex;
-      if (lastTriggeredStopRef.current !== arrivalStopKey) {
-        lastTriggeredStopRef.current = arrivalStopKey;
-        triggerArrivalAtStop(arrivalStopIndex);
+      if (arrivalStopIndex >= 0) {
+        const arrivalStopKey = stopsList[arrivalStopIndex].id || arrivalStopIndex;
+        if (lastTriggeredStopRef.current !== arrivalStopKey) {
+          lastTriggeredStopRef.current = arrivalStopKey;
+          triggerArrivalAtStop(arrivalStopIndex);
+        }
       }
-    }, (error) => setStatusMessage(`Waiting for bus location: ${error.message}`), {
-      enableHighAccuracy: true, maximumAge: 3000, timeout: 15000
-    });
+    }, 2500);
+
     return () => {
       cancelled = true;
-      navigator.geolocation.clearWatch(watchId);
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+      clearInterval(bridgeGpsTimer);
     };
-  }, [isTripActive, currentStopIndex, stopsList, dutySession.plateNumber, isTestMode]);
+  }, [isTripActive, currentStopIndex, stopsList, dutySession.plateNumber]);
 
-  // QR Code Processing from Camera Scanner or Gun
+  // QR Code Processing from the embedded USB/RS232-TTL scanner.
   const handleQrScan = async (rawCode) => {
     const raw = String(rawCode || '').trim();
     if (!raw) return;
@@ -251,7 +413,7 @@ export function RouteInformationPage() {
     const found = await fetchJourneyByQrToken(token || raw);
 
     if (!found.success || !found.data) {
-      setStatusMessage(`QR Scan Alert: ${found.error || 'Pass not recognized.'}`);
+      setStatusMessage(`Hardware scan alert: ${found.error || 'Pass not recognized.'}`);
       return;
     }
 
@@ -279,7 +441,7 @@ export function RouteInformationPage() {
         qr_token: token,
         count,
         passenger_category: cat,
-        passenger_name: journey.passenger_name || 'Anonymous Passenger',
+        passenger_name: 'Anonymous Passenger',
         origin_name: journey.origin_name || parsed?.boardingStop || currentStop.name,
         destination_name: journey.destination_name || parsed?.destinationStop || currentStop.name,
         status: nextEventType === 'board' ? 'boarded' : 'completed'
@@ -312,101 +474,110 @@ export function RouteInformationPage() {
         const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - 1) : availablePrioritySeats;
         const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - 1) : availableRegularSeats;
         setStatusMessage(
-          `✓ PASSENGER BOARDED: ${journey.passenger_name || 'Passenger'} (${cat} · ${isPri ? `Priority /${prioritySeatCapacity}` : `Regular /${regularSeatCapacity}`}). Decremented ${isPri ? `Priority Seats (${remainingPriority}/${prioritySeatCapacity})` : `Regular Seats (${remainingRegular}/${regularSeatCapacity})`}. Boarding: ${journey.origin_name || currentStop.name} → Alights: ${journey.destination_name || 'Destination'}.`
+          `✓ PASSENGER BOARDED (${cat}). Decremented ${isPri ? `Priority Seats (${remainingPriority}/${prioritySeatCapacity})` : `Regular Seats (${remainingRegular}/${regularSeatCapacity})`}. Boarding: ${journey.origin_name || currentStop.name} → Alights: ${journey.destination_name || 'Destination'}.`
         );
       } else {
-        setStatusMessage(`✓ PASSENGER ALIGHTED: ${journey.passenger_name || 'Passenger'} alighted at ${journey.destination_name || currentStop.name}. Seat restored.`);
+        setStatusMessage(`✓ PASSENGER ALIGHTED at ${journey.destination_name || currentStop.name}. Seat restored.`);
       }
     }
 
     // Refresh passenger registry
     if (operationalTripId) {
       const reg = await fetchPassengerRegistry(operationalTripId);
-      if (reg.success) setPassengerRegistry(tripSegmentStartedAt
-        ? reg.data.filter((row) => new Date(row.created_at || row.boarded_at || 0).getTime() >= tripSegmentStartedAt)
-        : reg.data);
+      if (reg.success) setPassengerRegistry(reg.data);
     }
   };
 
   // Start / Restart Another Trip Handler
-  const handleStartAnotherTrip = () => {
-    if (!operationalTripId) {
-      setStatusMessage('No active database trip is assigned to this bus. Start an assigned trip before boarding passengers.');
+  const handleStartAnotherTrip = async (forceNewTrip = false) => {
+    setStatusMessage(forceNewTrip ? 'Starting a new trip…' : 'Starting trip…');
+    let activeTripId;
+    try {
+      activeTripId = await ensureOperationalTrip();
+      if (forceNewTrip) {
+        const nextTrip = await startNextTrip({ currentTripId: activeTripId, direction });
+        if (!nextTrip.success || !nextTrip.data?.id) throw new Error(nextTrip.error || 'Unable to start the next trip.');
+        activeTripId = nextTrip.data.id;
+        setOperationalTripId(activeTripId);
+        updateDutySession({ tripId: activeTripId, tripDirection: direction });
+      }
+    } catch (error) {
+      setStatusMessage(`Trip start failed: ${error.message}`);
       return;
     }
-    const segmentStartedAt = Date.now();
-    localStorage.setItem(tripSegmentKey, String(segmentStartedAt));
-    setTripSegmentStartedAt(segmentStartedAt);
+    localStorage.removeItem(tripSegmentKey);
+    setTripSegmentStartedAt(0);
     setPassengerRegistry([]);
     lastTriggeredStopRef.current = null;
     setCurrentStopIndex(0);
     setIsTripActive(true);
-    setTripCount((prev) => prev + 1);
-    setShowManualRegistration(true);
-    setManualDestination(stopsList[1]?.name || '');
-    setStatusMessage(null);
-    setStatusMessage(`Trip #${tripCount + 1} (${direction}) started at ${stopsList[0].name}.`);
-    setTimeout(() => setStatusMessage(null), 5000);
+    if (forceNewTrip) setTripCount((prev) => prev + 1);
+
+    // Relay trip direction to Pi 3B Announcer via Pi 4B bridge
+    const bridgeRes = await sendDirectionToBridge(direction);
+    const announcerNote = bridgeRes.success
+      ? '✓ Pi 3B Announcer started'
+      : `(Pi 3B notice: ${bridgeRes.error})`;
+
+    const displayedTrip = forceNewTrip ? tripCount + 1 : tripCount;
+    setStatusMessage(`Trip #${displayedTrip} (${direction}) started at ${stopsList[0].name}. ${announcerNote}`);
+    setTimeout(() => setStatusMessage(null), 6000);
+  };
+
+  const handlePauseTrip = async () => {
+    setIsTripActive(false);
+    await endTripOnBridge();
+    setStatusMessage('Trip paused. Pi 3B Bus Announcer set to standby.');
   };
 
   const handleManualRegistration = async (event) => {
     event.preventDefault();
-    if (!manualPassengerName.trim() || !manualDestination) return;
+    if (!manualDestination || manualSubmissionRef.current) return;
+    if (!isTripActive) {
+      setStatusMessage('Passenger registration failed: Start the trip first.');
+      return;
+    }
+    manualSubmissionRef.current = true;
     setManualRegistrationBusy(true);
 
-    if (isTestMode) {
-      const capacity = busCapacity;
-      if (totalOnboard >= capacity) {
-        setStatusMessage('Passenger registration failed: The bus has no available seats.');
-        setManualRegistrationBusy(false);
-        return;
-      }
-      if ((isPriorityCategory(manualPassengerCategory) ? availablePrioritySeats : availableRegularSeats) <= 0) {
-        setStatusMessage(`Passenger registration failed: No ${isPriorityCategory(manualPassengerCategory) ? 'priority' : 'regular'} seats are available.`);
-        setManualRegistrationBusy(false);
-        return;
-      }
-      const testPassenger = {
-        id: `test-${crypto.randomUUID()}`,
-        passenger_name: manualPassengerName.trim(),
-        passenger_category: manualPassengerCategory,
-        origin_name: currentStop.name,
-        destination_name: manualDestination,
-        count: 1,
-        status: 'boarded',
-        boarded_at: new Date().toISOString()
-      };
-      setPassengerRegistry((rows) => [...rows, testPassenger]);
-      setStatusMessage(`Passenger boarded at ${currentStop.name}. ${Math.max(0, capacity - totalOnboard - 1)} seats available; destination: ${manualDestination}.`);
-      setManualPassengerName('');
-      setShowManualRegistration(false);
+    const capacity = busCapacity;
+    if (totalOnboard >= capacity) {
+      setStatusMessage('Passenger registration failed: The bus has no available seats.');
       setManualRegistrationBusy(false);
+      manualSubmissionRef.current = false;
+      return;
+    }
+    if ((isPriorityCategory(manualPassengerCategory) ? availablePrioritySeats : availableRegularSeats) <= 0) {
+      setStatusMessage(`Passenger registration failed: No ${isPriorityCategory(manualPassengerCategory) ? 'priority' : 'regular'} seats are available.`);
+      setManualRegistrationBusy(false);
+      manualSubmissionRef.current = false;
       return;
     }
 
-    let activeTripId = operationalTripId;
-    if (dutySession.plateNumber) {
-      const ongoing = await fetchOngoingTripForBus(dutySession.plateNumber);
-      activeTripId = ongoing.success ? ongoing.data?.id : null;
-    }
-    if (!activeTripId) {
-      setStatusMessage('Passenger registration failed: No ongoing trip is assigned to this bus. Start or resume the bus trip first.');
+    let activeTripId;
+    try {
+      activeTripId = await ensureOperationalTrip();
+    } catch (error) {
+      setStatusMessage(`Passenger registration failed: ${error.message}`);
       setManualRegistrationBusy(false);
+      manualSubmissionRef.current = false;
       return;
     }
-    setOperationalTripId(activeTripId);
 
     const isPri = isPriorityCategory(manualPassengerCategory);
     const created = await createManualPassengerJourney({
-      passengerName: `${manualPassengerName} (${manualPassengerCategory})`,
+      passengerName: `Anonymous Passenger (${manualPassengerCategory})`,
+      passengerCategory: manualPassengerCategory,
       origin: currentStop.name,
       destination: manualDestination,
-      tripId: activeTripId
+      tripId: activeTripId,
+      routeDirection: direction
     });
 
     if (!created.success) {
       setStatusMessage(`Passenger registration failed: ${created.error}`);
       setManualRegistrationBusy(false);
+      manualSubmissionRef.current = false;
       return;
     }
 
@@ -421,33 +592,34 @@ export function RouteInformationPage() {
     if (!eventResult.success) {
       setStatusMessage(`Passenger registered with notice: ${eventResult.error}`);
     } else {
-      setPassengerRegistry((rows) => [
-        ...rows,
-        {
-          ...created.data,
-          passenger_category: manualPassengerCategory,
-          status: 'boarded',
-          boarded_at: new Date().toISOString()
-        }
-      ]);
+      const refreshed = await fetchPassengerRegistry(activeTripId);
+      if (refreshed.success) setPassengerRegistry(refreshed.data);
       const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - 1) : availablePrioritySeats;
       const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - 1) : availableRegularSeats;
+      const stopTotal = passengersBoardedAt(currentStop.name) + 1;
       setStatusMessage(
-        `✓ ${manualPassengerName.trim()} (${manualPassengerCategory}) boarded at ${currentStop.name}. Decremented ${isPri ? `Priority Seats (${remainingPriority}/${prioritySeatCapacity})` : `Regular Seats (${remainingRegular}/${regularSeatCapacity})`}. Destination: ${manualDestination}.`
+        `✓ Passenger boarded at ${currentStop.name}. Stop total: ${stopTotal}. Decremented ${isPri ? `Priority Seats (${remainingPriority}/${prioritySeatCapacity})` : `Regular Seats (${remainingRegular}/${regularSeatCapacity})`}. Destination: ${manualDestination}.`
       );
-      setManualPassengerName('');
       setShowManualRegistration(false);
     }
     setManualRegistrationBusy(false);
+    manualSubmissionRef.current = false;
   };
 
-  const handleDirectionToggle = (newDir) => {
+  const handleDirectionToggle = async (newDir) => {
     lastTriggeredStopRef.current = null;
     setDirection(newDir);
     setCurrentStopIndex(0);
     setIsTripActive(false);
     updateDutySession({ tripDirection: newDir });
-    setStatusMessage(`Direction updated to ${newDir}. Click "Start Trip" to begin.`);
+
+    // Send direction command to Pi 3B Bus Announcer
+    const res = await sendDirectionToBridge(newDir);
+    if (res.success) {
+      setStatusMessage(`Direction updated to ${newDir}. Sent ${newDir} command to Pi 3B Announcer.`);
+    } else {
+      setStatusMessage(`Direction updated to ${newDir}. Click "Start Trip" to begin. (Pi 3B: ${res.error})`);
+    }
   };
 
   // Format Time: Hours and Minutes ONLY (e.g. "10:30 AM")
@@ -461,15 +633,7 @@ export function RouteInformationPage() {
   });
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 'calc(100vh - 2rem)', gap: '0.75rem', boxSizing: 'border-box' }}>
-      {/* Camera QR Scanner Modal */}
-      <QrCameraScannerModal
-        isOpen={isCameraOpen}
-        onClose={() => setIsCameraOpen(false)}
-        onScan={handleQrScan}
-        title="Scan Commuter Digital QR Pass"
-      />
-
+    <div style={{ display: 'flex', flexDirection: 'column', height: 'auto', minHeight: 'calc(100vh - 5rem)', gap: '0.6rem', boxSizing: 'border-box' }}>
       {/* Location Permission Prompt Banner */}
       {locationPermission === false && (
         <div style={{
@@ -504,6 +668,15 @@ export function RouteInformationPage() {
                 <span className={`badge ${isTripActive ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: '0.72rem', padding: '0.15rem 0.5rem' }}>
                   {isTripActive ? <><span className="pulse-dot"></span> TRIP #{tripCount} IN PROGRESS</> : `IDLE (TRIP #${tripCount})`}
                 </span>
+                {announcerInfo.online ? (
+                  <span className="badge badge-success" style={{ fontSize: '0.72rem', padding: '0.15rem 0.5rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }} title="Pi 3B Bus Announcer is connected and responsive">
+                    <Volume2 size={12} /> Pi 3B Announcer Online
+                  </span>
+                ) : (
+                  <span className="badge" style={{ fontSize: '0.72rem', padding: '0.15rem 0.5rem', backgroundColor: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid #ef4444', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }} title="Pi 3B Announcer unreachable or bridge offline">
+                    <VolumeX size={12} /> Pi 3B Announcer Offline
+                  </span>
+                )}
                 <strong style={{ fontSize: '1.05rem', color: 'var(--text-main)' }}>QC Bus Route 4</strong>
               </div>
               <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
@@ -511,7 +684,7 @@ export function RouteInformationPage() {
               </div>
             </div>
 
-            {/* NORTHBOUND & SOUTHBOUND OPTIONS & QR SCANNER BUTTON */}
+            {/* NORTHBOUND & SOUTHBOUND OPTIONS & HARDWARE SCANNER INPUT */}
             <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', gap: '0.25rem', backgroundColor: 'var(--bg-subtle)', padding: '0.2rem', borderRadius: '6px', border: '1px solid var(--border-color)', width: 'fit-content' }}>
                 <button
@@ -532,14 +705,9 @@ export function RouteInformationPage() {
                 </button>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setIsCameraOpen(true)}
-                className="btn btn-primary"
-                style={{ padding: '0.3rem 0.75rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.3rem', backgroundColor: '#0284c7' }}
-              >
-                <Camera size={13} /> Scan QR Pass
-              </button>
+              <form onSubmit={async (event) => { event.preventDefault(); const raw = event.currentTarget.elements.qr.value; event.currentTarget.reset(); await handleQrScan(raw); scannerInputRef.current?.focus(); }} style={{ display: 'flex', gap: '.35rem' }}>
+                <input ref={scannerInputRef} name="qr" className="form-input" autoFocus autoComplete="off" placeholder="USB scanner ready" aria-label="USB QR barcode scanner input" style={{ width: '14rem', padding: '.35rem .55rem', fontSize: '.75rem' }} />
+              </form>
             </div>
           </div>
 
@@ -612,32 +780,27 @@ export function RouteInformationPage() {
       {/* MANUAL PASSENGER REGISTRATION MODAL */}
       {showManualRegistration && (
         <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.78)', display: 'grid', placeItems: 'center', zIndex: 1500, padding: '1rem' }}>
-          <form className="card" onSubmit={handleManualRegistration} style={{ width: 'min(500px, 100%)', padding: '1.5rem', border: '2px solid #06b6d4', boxShadow: '0 20px 40px rgba(0,0,0,0.6)' }}>
+          <form className="card" onSubmit={handleManualRegistration} style={{ width: 'min(500px, 100%)', padding: '1.5rem', border: currentStopIndex === stopsList.length - 1 ? '2px solid #f59e0b' : '2px solid #06b6d4', boxShadow: '0 20px 40px rgba(0,0,0,0.6)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.65rem' }}>
-              <span className="badge badge-success" style={{ fontSize: '0.75rem', fontWeight: 800 }}>
-                📍 BUS AT STOP {currentStopIndex + 1} OF 15
+              <span className={`badge ${currentStopIndex === stopsList.length - 1 ? 'badge-warning' : 'badge-success'}`} style={{ fontSize: '0.75rem', fontWeight: 800 }}>
+                {currentStopIndex === stopsList.length - 1 ? '🏁 TARGET DESTINATION REACHED (STOP 15 OF 15)' : `📍 BUS AT STOP ${currentStopIndex + 1} OF 15 (WITHIN 5M)`}
               </span>
               <button type="button" onClick={() => setShowManualRegistration(false)} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '1.25rem', padding: '0 0.25rem' }}>×</button>
             </div>
             <h2 style={{ fontSize: '1.25rem', marginTop: 0, marginBottom: '0.25rem', color: 'var(--text-main)' }}>
-              Manual Passenger Registration
+              {currentStopIndex === stopsList.length - 1 ? '🏁 Final Terminal Reached' : 'Manual Passenger Registration'}
             </h2>
             <p style={{ color: '#94a3b8', fontSize: '0.85rem', marginBottom: '1rem', lineHeight: '1.4' }}>
-              Bus detected at Stop {currentStopIndex + 1}: <strong style={{ color: '#38bdf8' }}>{currentStop.name}</strong>
-              <br />
-              <span style={{ fontSize: '0.75rem', color: '#64748b' }}>GPS: {currentStop.lat?.toFixed(5)}, {currentStop.lng?.toFixed(5)}</span>
+              {currentStopIndex === stopsList.length - 1 ? (
+                <span style={{ color: '#fbbf24', fontWeight: 700 }}>Bus has arrived at target destination terminal within 5m radius: <strong>{currentStop.name}</strong></span>
+              ) : (
+                <span>Bus detected within 5m radius at Stop {currentStopIndex + 1}: <strong style={{ color: '#38bdf8' }}>{currentStop.name}</strong></span>
+              )}
             </p>
 
-            <label className="form-label" htmlFor="manual-passenger-name">Passenger Name / Identifier</label>
-            <input
-              id="manual-passenger-name"
-              className="form-input"
-              placeholder="e.g. Maria Santos (Walk-in)"
-              value={manualPassengerName}
-              onChange={(e) => setManualPassengerName(e.target.value)}
-              required
-              maxLength={120}
-            />
+            <div style={{ padding: '.65rem .8rem', marginBottom: '.75rem', borderRadius: '8px', backgroundColor: 'rgba(6, 182, 212, .12)', border: '1px solid #0891b2', color: '#67e8f9', fontWeight: 800 }}>
+              Already boarded at this stop: {passengersBoardedAt(currentStop.name)}
+            </div>
 
             <label className="form-label" htmlFor="manual-passenger-category" style={{ marginTop: '.75rem' }}>
               Passenger Category (Determines /20 Priority vs /30 Regular Seating)
@@ -679,7 +842,7 @@ export function RouteInformationPage() {
                 type="submit"
                 className="btn btn-primary"
                 style={{ flex: 1, backgroundColor: '#06b6d4', borderColor: '#06b6d4' }}
-                disabled={manualRegistrationBusy || !operationalTripId || !manualDestination}
+                disabled={manualRegistrationBusy || !isTripActive || !operationalTripId || !manualDestination}
               >
                 {manualRegistrationBusy ? 'Registering…' : 'Confirm & Board Passenger'}
               </button>
@@ -690,7 +853,7 @@ export function RouteInformationPage() {
       )}
 
       {/* MAIN ROUTE STOP SEQUENCE SECTION */}
-      <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '1rem', overflow: 'hidden', minHeight: '400px' }}>
+      <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '0.75rem', overflow: 'visible', minHeight: '0' }}>
         {/* Sequence Title & Controls */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border-color)', flexShrink: 0, flexWrap: 'wrap', gap: '.5rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
@@ -701,18 +864,10 @@ export function RouteInformationPage() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <button
-              type="button"
-              onClick={() => setIsCameraOpen(true)}
-              className="btn btn-primary"
-              style={{ padding: '0.3rem 0.75rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.3rem', backgroundColor: '#0284c7' }}
-            >
-              <Camera size={14} /> Scan Pass
-            </button>
             {isTripActive ? (
               <button
                 type="button"
-                onClick={() => setIsTripActive(false)}
+                onClick={handlePauseTrip}
                 className="btn btn-secondary"
                 style={{ padding: '0.3rem 0.75rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
               >
@@ -721,7 +876,7 @@ export function RouteInformationPage() {
             ) : (
               <button
                 type="button"
-                onClick={handleStartAnotherTrip}
+                onClick={() => handleStartAnotherTrip(false)}
                 className="btn btn-primary"
                 style={{ padding: '0.3rem 0.75rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
               >
@@ -735,11 +890,11 @@ export function RouteInformationPage() {
         <div style={{
           flex: 1,
           display: 'grid',
-          gridTemplateColumns: 'repeat(5, 1fr)',
-          gridTemplateRows: 'repeat(3, 1fr)',
-          gap: '0.65rem',
-          height: '100%',
-          overflowY: 'auto'
+          gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+          gridTemplateRows: 'repeat(3, minmax(0, 1fr))',
+          gap: '0.5rem',
+          height: 'auto',
+          overflow: 'visible'
         }}>
           {stopsList.map((s, idx) => {
             const isCurrent = idx === currentStopIndex;
@@ -753,7 +908,7 @@ export function RouteInformationPage() {
                 onClick={() => triggerArrivalAtStop(idx)}
                 title={`Click to set Bus at Stop ${idx + 1} and open manual passenger registration`}
                 style={{
-                  padding: '0.75rem',
+                  padding: '0.55rem',
                   borderRadius: '8px',
                   cursor: 'pointer',
                   border: isCurrent ? '3px solid #10b981' : (isPassed ? '1px solid rgba(255, 255, 255, 0.05)' : '1px solid var(--border-color)'),
@@ -778,9 +933,6 @@ export function RouteInformationPage() {
                       borderRadius: '4px'
                     }}>
                       STOP {idx + 1}
-                    </span>
-                    <span style={{ fontSize: '0.65rem', color: '#64748b' }}>
-                      {s.lat?.toFixed(3)}, {s.lng?.toFixed(3)}
                     </span>
                   </div>
                   <div style={{
@@ -830,7 +982,7 @@ export function RouteInformationPage() {
 
           <button
             type="button"
-            onClick={handleStartAnotherTrip}
+            onClick={() => handleStartAnotherTrip(true)}
             className="btn btn-primary"
             style={{ justifyContent: 'center', padding: '0.45rem 1rem', fontSize: '0.88rem', fontWeight: 800, backgroundColor: '#10b981', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
           >

@@ -18,7 +18,7 @@ import { generateDailyTripId, createPassengerQrPayload, isPriorityCategory } fro
 import { drawQRCodeCanvas, downloadQRImage } from '../utils/qrGenerator';
 import { InteractiveMap } from './InteractiveMap';
 import { fetchGoogleMapsETA } from '../services/googleMapsService';
-import { findNearestStop, calculateDistanceKm } from '../utils/geoUtils';
+import { findNearestStop, calculateDistanceKm, getAccurateCurrentPosition } from '../utils/geoUtils';
 import {
   savePassengerJourney,
   updateJourneyStatus,
@@ -120,6 +120,7 @@ const TRANSLATIONS = {
 
 export function StartTripInterface({
   initialTab,
+  startTripRequestId,
   currentUser,
   onUpdateCategory,
   onLogout,
@@ -180,6 +181,8 @@ export function StartTripInterface({
   const [companionCount, setCompanionCount] = useState(0);
   const [bookingCategory, setBookingCategory] = useState(currentUser?.category || 'Regular');
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
+  const [detectedNearestStop, setDetectedNearestStop] = useState(null);
+  const handledStartTripRequest = useRef(0);
   const [savingTrip, setSavingTrip] = useState(false);
   const [destinationReachedModalOpen, setDestinationReachedModalOpen] = useState(false);
 
@@ -209,11 +212,19 @@ export function StartTripInterface({
     catch { return []; }
   });
   const visibleTripHistory = tripHistory.filter(item => !hiddenTripIds.includes(item.dbId || item.id));
-  const busCapacity = Number(routeBusTrip?.bus?.capacity ?? occupancy?.bus_capacity) || null;
+  const busCapacity = Number(routeBusTrip?.bus?.capacity ?? occupancy?.bus_capacity) || 50;
   const currentOnboard = occupancy?.current_onboard == null ? null : Number(occupancy.current_onboard);
   const availableSeats = occupancy?.available_seats == null
     ? (busCapacity != null && currentOnboard != null ? Math.max(0, busCapacity - currentOnboard) : null)
     : Number(occupancy.available_seats);
+  const priorityBoarded = Number(occupancy?.priority_boarded ?? 0);
+  const regularBoarded = Number(occupancy?.regular_boarded ?? 0);
+  const availablePrioritySeats = occupancy?.available_priority_seats != null
+    ? Number(occupancy.available_priority_seats)
+    : Math.max(0, 20 - priorityBoarded);
+  const availableRegularSeats = occupancy?.available_regular_seats != null
+    ? Number(occupancy.available_regular_seats)
+    : Math.max(0, 30 - regularBoarded);
   const persistHiddenTrips = (ids) => {
     const next = [...new Set(ids)];
     setHiddenTripIds(next);
@@ -232,21 +243,21 @@ export function StartTripInterface({
 
   const reachedStopNotice = useRef(false);
 
-  // Proximity detection for destination reached via bus location
+  // Proximity detection for destination reached via bus location (5-meter radius: 0.005 km)
   useEffect(() => {
     if (!activeTrip || reachedStopNotice.current) return;
     const stop = activeTrip.toStop;
     if (stop?.lat && stop?.lng && liveBusCoords?.lat && liveBusCoords?.lng) {
-      const dist = calculateDistanceKm(liveBusCoords.lat, liveBusCoords.lng, stop.lat, stop.lng);
-      if (dist <= 0.25) {
+      const distKm = calculateDistanceKm(liveBusCoords.lat, liveBusCoords.lng, stop.lat, stop.lng);
+      if (distKm <= 0.005) {
         reachedStopNotice.current = true;
         setDestinationReachedModalOpen(true);
-        onShowToast?.(`Your bus has reached ${stop.name || stop}.`, 'stop-reached');
+        onShowToast?.(`Your bus has reached destination: ${stop.name || stop} within 5m radius!`, 'stop-reached');
       }
     }
   }, [activeTrip, liveBusCoords, onShowToast]);
 
-  // Proximity detection for destination reached via device GPS
+  // Proximity detection for destination reached via device GPS (5-meter radius: 0.005 km)
   useEffect(() => {
     if (!activeTrip || reachedStopNotice.current) return;
     const stop = activeTrip.toStop;
@@ -255,15 +266,15 @@ export function StartTripInterface({
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         if (!activeTrip || reachedStopNotice.current) return;
-        const dist = calculateDistanceKm(pos.coords.latitude, pos.coords.longitude, stop.lat, stop.lng);
-        if (dist <= 0.25) {
+        const distKm = calculateDistanceKm(pos.coords.latitude, pos.coords.longitude, stop.lat, stop.lng);
+        if (distKm <= 0.005) {
           reachedStopNotice.current = true;
           setDestinationReachedModalOpen(true);
-          onShowToast?.(`You have reached your destination: ${stop.name || stop}`, 'stop-reached');
+          onShowToast?.(`You have reached your destination: ${stop.name || stop} within 5m radius!`, 'stop-reached');
         }
       },
       () => {},
-      { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
     );
     return () => {
       navigator.geolocation.clearWatch(watchId);
@@ -353,9 +364,11 @@ export function StartTripInterface({
             const restoredTo = selectedRoute.stops.find(s => s.name === activeItem.destination_name) || { name: activeItem.destination_name, id: 'stop-2' };
             const travelMins = 20;
             const category = activeItem.passenger_category || currentUser?.category || 'Regular';
+            const restoredTripId = activeItem.qr_token || generateDailyTripId();
             const qrData = createPassengerQrPayload({
-              tripId: activeItem.qr_token,
+              tripId: restoredTripId,
               count: activeItem.passenger_count || 1,
+              companions: activeItem.companions || 0,
               category,
               boardingStop: activeItem.origin_name,
               destinationStop: activeItem.destination_name,
@@ -363,18 +376,18 @@ export function StartTripInterface({
             });
 
             setActiveTrip({
-              id: activeItem.id.slice(0, 8).toUpperCase(),
+              id: restoredTripId,
               dbId: activeItem.id,
               fromStop: restoredFrom,
               toStop: restoredTo,
               route: selectedRoute,
               bus: { plateNumber: routeBusTrip?.bus?.plate_number || '' },
-              companions: 0,
-              totalPassengers: 1,
+              companions: Math.max(0, Number(activeItem.companions || 0)),
+              totalPassengers: Math.max(1, Number(activeItem.passenger_count || 1)),
               status: activeItem.status === 'boarded' ? 'In Progress' : 'Planned',
               isQrScanned: false,
               qrData,
-              dailyTripId: activeItem.qr_token || '',
+              dailyTripId: restoredTripId,
               category,
               startTime: activeItem.created_at ? new Date(activeItem.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
               estMinutes: travelMins,
@@ -419,24 +432,26 @@ export function StartTripInterface({
     return () => { mounted = false; clearInterval(refreshTimer); };
   }, [selectedRoute.code]);
 
-  // Subscribe to the active trip and its bus, resolved from the selected route.
+  // Subscribe and poll live bus location and occupancy
   useEffect(() => {
-    if ((activeTab !== 'tracking' && !activeTrip) || !routeBusTrip?.id || !routeBusTrip?.bus_id) return undefined;
+    if (!routeBusTrip?.bus_id) return undefined;
     let mounted = true;
     const applyBusLocation = (location) => {
+      if (!location || location.latitude == null || location.longitude == null) return;
       const updatedAt = Date.parse(location.updated_at);
       const secondsAgo = Number.isFinite(updatedAt)
         ? Math.max(0, Math.floor((Date.now() - updatedAt) / 1000))
         : 0;
       setLiveBusCoords({
-        lat: location.latitude, lng: location.longitude,
-        speed: location.speed, updated_at: location.updated_at
+        lat: Number(location.latitude),
+        lng: Number(location.longitude),
+        speed: location.speed != null ? Number(location.speed) : null,
+        updated_at: location.updated_at
       });
       setLastUpdatedSecondsAgo(secondsAgo);
       setIsSignalLost(secondsAgo > 60);
     };
 
-    setLiveBusCoords(null);
     fetchCurrentBusLocation(routeBusTrip.bus_id).then((result) => {
       if (mounted && result.success && result.data) applyBusLocation(result.data);
     });
@@ -447,12 +462,27 @@ export function StartTripInterface({
       applyBusLocation(location);
     });
     const unsubscribeOccupancy = subscribeToTripOccupancy(routeBusTrip.id, setOccupancy);
+
+    // Active polling (every 2.5s) to guarantee real-time updates from personnel GPS and boarding changes
+    const livePoller = setInterval(async () => {
+      if (!mounted) return;
+      if (routeBusTrip?.bus_id) {
+        const loc = await fetchCurrentBusLocation(routeBusTrip.bus_id);
+        if (mounted && loc.success && loc.data) applyBusLocation(loc.data);
+      }
+      if (routeBusTrip?.id) {
+        const occ = await fetchTripOccupancy(routeBusTrip.id);
+        if (mounted && occ.success && occ.data) setOccupancy(occ.data);
+      }
+    }, 2500);
+
     return () => {
       mounted = false;
       unsubscribeLocation();
       unsubscribeOccupancy();
+      clearInterval(livePoller);
     };
-  }, [activeTab, activeTrip, routeBusTrip?.id, routeBusTrip?.bus_id]);
+  }, [routeBusTrip?.id, routeBusTrip?.bus_id]);
 
   useEffect(() => {
     if ((activeTab !== 'tracking' && !activeTrip) || !liveBusCoords?.updated_at) return undefined;
@@ -472,35 +502,44 @@ export function StartTripInterface({
     setEndStop(route.stops[1] || route.stops[0]);
   };
 
-  const handleDetectNearestStop = () => {
+  const handleDetectNearestStop = async () => {
     if (!navigator.geolocation) {
       if (onShowToast) onShowToast('Geolocation is not supported by your browser.');
       return;
     }
     setIsDetectingLocation(true);
     if (onShowToast) onShowToast('Detecting nearest stop to your location...');
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setIsDetectingLocation(false);
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        const candidateStops = configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS;
-        const nearest = findNearestStop(lat, lng, candidateStops);
-        if (nearest && nearest.stop) {
-          setStartStop(nearest.stop);
-          if (onShowToast) onShowToast(`Nearest stop found: ${nearest.stop.name} (${nearest.formattedDistance})`);
-        } else {
-          if (onShowToast) onShowToast('Could not determine nearest stop.');
-        }
-      },
-      (err) => {
-        setIsDetectingLocation(false);
-        console.warn('Geolocation error:', err);
-        if (onShowToast) onShowToast('Location access denied or unavailable.');
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
-    );
+    try {
+      const pos = await getAccurateCurrentPosition();
+      const userLatitude = Number(pos.coords.latitude);
+      const userLongitude = Number(pos.coords.longitude);
+      const nearest = findNearestStop(userLatitude, userLongitude, ROUTE4_STOPS);
+      if (nearest?.stop) {
+        const selectedStop = configuredRoute4Stops.find((stop) => stop.id === nearest.stop.id) || nearest.stop;
+        setDetectedNearestStop({
+          stop: selectedStop,
+          formattedDistance: nearest.formattedDistance,
+          accuracyMeters: Math.round(Number(pos.coords.accuracy) || 0)
+        });
+        if (onShowToast) onShowToast('Nearest Stop Detected.');
+      } else if (onShowToast) {
+        onShowToast('Could not determine nearest stop from the available coordinates.');
+      }
+    } catch (err) {
+      console.warn('Geolocation error:', err);
+      if (onShowToast) onShowToast('Location access denied or unavailable.');
+    } finally {
+      setIsDetectingLocation(false);
+    }
   };
+
+  useEffect(() => {
+    if (!startTripRequestId || activeTrip || handledStartTripRequest.current === startTripRequestId) return;
+    handledStartTripRequest.current = startTripRequestId;
+    setActiveTab('home');
+    setStep('form');
+    handleDetectNearestStop();
+  }, [startTripRequestId]);
 
   const handleConfirmRouteSelection = () => {
     if (activeTrip) {
@@ -566,7 +605,8 @@ export function StartTripInterface({
         passenger_name: currentUser?.name || currentUser?.email || 'Passenger',
         registration_source: 'app',
         passenger_category: category,
-        passenger_count: totalPassengerCount
+        passenger_count: totalPassengerCount,
+        companions: companionNumber
       });
 
       if (!res.success) {
@@ -816,6 +856,18 @@ export function StartTripInterface({
                   <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Passengers onboard:</span>
                   <div style={{ fontWeight: 700 }}>{occupancy?.current_onboard ?? '—'}</div>
                 </div>
+                <div>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Driver:</span>
+                  <div style={{ fontWeight: 700 }}>{routeBusTrip?.personnel?.driverName || 'Not assigned'}</div>
+                </div>
+                <div>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Conductor:</span>
+                  <div style={{ fontWeight: 700 }}>{routeBusTrip?.personnel?.conductorName || 'Not assigned'}</div>
+                </div>
+                <div>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Dispatcher:</span>
+                  <div style={{ fontWeight: 700 }}>{routeBusTrip?.personnel?.dispatcherName || 'Not assigned'}</div>
+                </div>
               </div>
 
               {/* Digital Boarding Pass Display - Image 2 Format */}
@@ -961,6 +1013,46 @@ export function StartTripInterface({
                     </select>
                   </div>
 
+                  {detectedNearestStop && (
+                    <div style={{
+                      border: '1px solid var(--primary)',
+                      borderRadius: 'var(--radius-md)',
+                      backgroundColor: 'var(--primary-light)',
+                      padding: '1rem 1.1rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '1rem',
+                      flexWrap: 'wrap'
+                    }}>
+                      <div>
+                        <strong style={{ display: 'block', marginBottom: '.2rem' }}>Nearest Stop Detected.</strong>
+                        <span style={{ color: 'var(--text-secondary)', fontSize: '.88rem' }}>
+                          {detectedNearestStop.stop.name} · {detectedNearestStop.formattedDistance} away
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '.6rem', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          onClick={() => {
+                            setStartStop(detectedNearestStop.stop);
+                            setDetectedNearestStop(null);
+                          }}
+                        >
+                          Use This Stop
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => setDetectedNearestStop(null)}
+                        >
+                          Choose Another Stop
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
                     <div className="form-group">
                       <label className="form-label">{t.boardingStop}</label>
@@ -1091,11 +1183,11 @@ export function StartTripInterface({
                     value={bookingCategory}
                     onChange={(e) => setBookingCategory(e.target.value)}
                   >
-                    <option value="Regular">Regular (Standard Commuter)</option>
-                    <option value="Senior Citizen">Senior Citizen (Priority / 20% Subsidy)</option>
-                    <option value="Person with Disability (PWD)">Person with Disability (PWD / Priority)</option>
-                    <option value="Student">Student (Priority / Discounted)</option>
-                    <option value="Pregnant">Pregnant (Priority Seating)</option>
+                    <option value="Regular">Regular</option>
+                    <option value="Senior Citizen">Senior Citizen</option>
+                    <option value="Person with Disability (PWD)">Person with Disability (PWD)</option>
+                    <option value="Student">Student</option>
+                    <option value="Pregnant">Pregnant</option>
                   </select>
                 </div>
 
@@ -1412,24 +1504,45 @@ export function StartTripInterface({
           />
 
           <div className="glass-card">
-            <h3 style={{ fontSize: '1.2rem', marginBottom: '0.85rem' }}>Real-time Bus Occupancy & Seat Availability</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '1rem' }}>
-              <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1.1rem', borderRadius: '8px', border: '1px solid #06b6d4' }}>
-                <span style={{ fontSize: '0.78rem', color: '#06b6d4', fontWeight: 700, display: 'block', marginBottom: '.25rem' }}>AVAILABLE SEATS</span>
-                <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#06b6d4' }}>
+            <h3 style={{ fontSize: '1.2rem', marginBottom: '0.85rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <span>Real-time Bus Occupancy & Seat Availability</span>
+              {routeBusTrip?.bus?.plate_number && (
+                <span className="badge badge-success" style={{ fontSize: '0.75rem', padding: '0.2rem 0.6rem' }}>
+                  🚌 {routeBusTrip.bus.plate_number} · Live Signal
+                </span>
+              )}
+            </h3>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.85rem' }}>
+              <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1rem', borderRadius: '8px', border: '1px solid #06b6d4' }}>
+                <span style={{ fontSize: '0.75rem', color: '#06b6d4', fontWeight: 700, display: 'block', marginBottom: '.25rem' }}>TOTAL AVAILABLE</span>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#06b6d4' }}>
                   {availableSeats == null ? '—' : `${availableSeats} / ${busCapacity}`}
                 </div>
-                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Calculated from the active trip and bus capacity.</span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Total open seating</span>
               </div>
 
-              <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1.1rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'block', marginBottom: '.25rem' }}>CURRENT ONBOARD</span>
-                <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#16a34a' }}>
-                  {currentOnboard == null ? '—' : `${currentOnboard} Passengers`}
+              <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1rem', borderRadius: '8px', border: '1px solid #10b981' }}>
+                <span style={{ fontSize: '0.75rem', color: '#10b981', fontWeight: 700, display: 'block', marginBottom: '.25rem' }}>CURRENT ONBOARD</span>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#10b981' }}>
+                  {currentOnboard == null ? '0' : `${currentOnboard} Passengers`}
                 </div>
-                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                  {busCapacity == null ? 'Waiting for active trip occupancy.' : `Bus capacity: ${busCapacity}`}
-                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Currently travelling</span>
+              </div>
+
+              <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1rem', borderRadius: '8px', border: '1px solid #f59e0b' }}>
+                <span style={{ fontSize: '0.75rem', color: '#f59e0b', fontWeight: 700, display: 'block', marginBottom: '.25rem' }}>PRIORITY SEATS</span>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#f59e0b' }}>
+                  {`${availablePrioritySeats} / 20`}
+                </div>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Senior, PWD, Pregnant</span>
+              </div>
+
+              <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1rem', borderRadius: '8px', border: '1px solid #8b5cf6' }}>
+                <span style={{ fontSize: '0.75rem', color: '#8b5cf6', fontWeight: 700, display: 'block', marginBottom: '.25rem' }}>REGULAR SEATS</span>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#8b5cf6' }}>
+                  {`${availableRegularSeats} / 30`}
+                </div>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Standard commuter seating</span>
               </div>
             </div>
           </div>
@@ -1470,22 +1583,10 @@ export function StartTripInterface({
 
             {/* Change Category Selector */}
             <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1.1rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.5rem', flexWrap: 'wrap', gap: '.4rem' }}>
+              <div style={{ marginBottom: '.5rem' }}>
                 <label className="form-label" style={{ fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
                   {t.categoryLabel}
                 </label>
-                <span
-                  className="badge"
-                  style={{
-                    backgroundColor: isPriorityCategory(currentUser?.category) ? 'rgba(245, 158, 11, 0.2)' : 'rgba(6, 182, 212, 0.2)',
-                    color: isPriorityCategory(currentUser?.category) ? '#fbbf24' : '#38bdf8',
-                    border: `1px solid ${isPriorityCategory(currentUser?.category) ? '#f59e0b' : '#06b6d4'}`,
-                    fontWeight: 700,
-                    fontSize: '.75rem'
-                  }}
-                >
-                  {currentUser?.category || 'Regular'} · {isPriorityCategory(currentUser?.category) ? 'Priority Seat Eligible (/20)' : 'Standard Seating (/30)'}
-                </span>
               </div>
               <select
                 className="form-select"
@@ -1496,15 +1597,12 @@ export function StartTripInterface({
                   }
                 }}
               >
-                <option value="Regular">Regular Passenger (Standard Seating /30)</option>
-                <option value="Student">Student (Standard Seating /30)</option>
-                <option value="Senior Citizen">Senior Citizen (Priority Seat Access /20)</option>
-                <option value="PWD">PWD - Person with Disability (Priority Seat Access /20)</option>
-                <option value="Pregnant">Pregnant (Priority Seat Access /20)</option>
+                <option value="Regular">Regular</option>
+                <option value="Student">Student</option>
+                <option value="Senior Citizen">Senior Citizen</option>
+                <option value="PWD">PWD - Person with Disability</option>
+                <option value="Pregnant">Pregnant</option>
               </select>
-              <p style={{ color: 'var(--text-muted)', fontSize: '.78rem', margin: '.5rem 0 0' }}>
-                Changing your category immediately updates your digital pass entitlement and priority seat eligibility across the bus network.
-              </p>
             </div>
           </div>
 
@@ -1641,16 +1739,16 @@ export function StartTripInterface({
               <CheckCircle size={36} />
             </div>
 
-            <span className="badge badge-success" style={{ marginBottom: '0.75rem', fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>
-              📍 Arrival Notification
+            <span className="badge badge-success" style={{ marginBottom: '0.75rem', fontSize: '0.8rem', padding: '0.35rem 0.75rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+              🏁 Target Destination Reached (5m Radius)
             </span>
 
             <h2 id="destination-modal-title" style={{ fontSize: '1.35rem', fontWeight: 800, margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>
-              You Have Reached Your Destination!
+              You Have Reached Your Target Destination!
             </h2>
 
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', margin: '0 0 1.25rem 0', lineHeight: 1.5 }}>
-              The bus has arrived at <strong>{activeTrip.toStop?.name || activeTrip.toStop}</strong>. Please gather your personal belongings and alight safely.
+              The vehicle is within <strong>5 meters</strong> of <strong>{activeTrip.toStop?.name || activeTrip.toStop}</strong>. Please prepare to alight safely.
             </p>
 
             <div style={{

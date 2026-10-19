@@ -1,298 +1,90 @@
-/**
- * Helper utility to generate official PDF trip summary report matching exact formal specifications:
- * - Separates Northbound and Southbound trips with clear section labels just before the date
- * - Header fields (Driver, Conductor, Dispatcher, Plate Number, Date)
- * - Table format: Stop Name, Time, Boarded Passengers, Alighted Passengers, Total Passengers, with summary Total row
- * - Signature lines: Driver's Name and Signature, Conductor's Name and Signature, Dispatcher's Name and Signature, and Verified by:
- */
-export function generatePDFSummaryReport({ timeframe = 'Day', dutySession = {} }) {
+/** Open a print-ready trip record that can be saved as a PDF. */
+export function generatePDFSummaryReport({ timeframe = 'Day', dutySession = {}, summary = {} }) {
   const reportWindow = window.open('', '_blank');
   if (!reportWindow) return;
 
-  const driverName = dutySession.driverName || 'Juan Dela Cruz';
-  const conductorName = dutySession.conductorName || 'Pedro Santos';
-  const dispatcherName = dutySession.dispatcherName || 'Ricardo Mendoza';
-  const plateNumber = dutySession.plateNumber || 'QC-BUS-401';
-  const dateFormatted = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'numeric', day: 'numeric' });
+  const rawDate = summary.serviceDate || dutySession.serviceDate || new Date().toISOString().slice(0, 10);
+  const parsedDate = new Date(`${rawDate}T00:00:00`);
+  const reportDate = Number.isNaN(parsedDate.getTime())
+    ? rawDate
+    : parsedDate.toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' });
+  const rows = Array.isArray(summary.stops) ? summary.stops : [];
+  const totals = summary.totals || {};
+  const dash = '-';
+  const esc = (value) => String(value ?? dash).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[char]));
+  const formatTime = (value) => {
+    if (!value) return dash;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? dash
+      : date.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' });
+  };
+  const driverName = summary.driverName || dutySession.driverName || 'Not assigned';
+  const conductorName = summary.conductorName || dutySession.conductorName || 'Not assigned';
+  const dispatcherName = summary.dispatcherName || dutySession.dispatcherName || 'Not assigned';
+  const plateNumber = summary.plateNumber || dutySession.plateNumber || 'Not assigned';
 
-  // Northbound stop records
-  const northboundStops = [
-    { stopName: 'QC Hall – NHA Interchange', time: '06:00 AM', boarded: 48, alighted: 0, total: 48 },
-    { stopName: 'North Ave – Veterans Hospital', time: '06:15 AM', boarded: 35, alighted: 12, total: 71 },
-    { stopName: 'Mindanao Ave corner Road 1', time: '06:28 AM', boarded: 24, alighted: 8, total: 87 },
-    { stopName: 'Mindanao Ave – Tullahan Bridge', time: '06:42 AM', boarded: 30, alighted: 15, total: 102 },
-    { stopName: 'Mindanao Ave corner Congressional', time: '07:00 AM', boarded: 52, alighted: 22, total: 132 },
-    { stopName: 'Mindanao Ave corner Tandang Sora', time: '07:18 AM', boarded: 41, alighted: 18, total: 155 },
-    { stopName: 'Quirino Hwy – SM City Novaliches', time: '07:40 AM', boarded: 95, alighted: 68, total: 182 },
-    { stopName: 'Gen. Luis Ave – Novaliches Bayan', time: '08:05 AM', boarded: 32, alighted: 95, total: 119 }
-  ];
+  reportWindow.document.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${esc(timeframe)} Trip Summary - ${esc(rawDate)}</title>
+  <style>
+    @page { size: A4 landscape; margin: 12mm 15mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: #111; background: #fff; font-family: Arial, Helvetica, sans-serif; font-size: 12px; }
+    .sheet { width: 100%; }
+    .details { display: grid; grid-template-columns: 1fr 1fr; column-gap: 70px; margin: 0 8px 28px; }
+    .field { display: grid; grid-template-columns: 132px 1fr; align-items: end; min-height: 27px; }
+    .label { white-space: nowrap; }
+    .value { min-height: 20px; padding: 0 4px 2px; border-bottom: 1px solid #777; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { border: 1px solid #111; padding: 5px 7px; text-align: left; height: 27px; vertical-align: middle; }
+    th { font-weight: 700; }
+    th:nth-child(1) { width: 36%; }
+    th:nth-child(2) { width: 14%; }
+    th:nth-child(3), th:nth-child(4), th:nth-child(5) { width: 16.66%; }
+    td.number { text-align: center; }
+    .total-row td { font-weight: 700; }
+    .total-label { text-align: right; }
+    .signatures { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; margin: 42px 12px 0; }
+    .signature-name { min-height: 24px; border-bottom: 1px solid #777; text-align: center; padding-bottom: 3px; font-weight: 600; }
+    .signature-label { padding-top: 5px; line-height: 1.15; }
+    @media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
+  </style>
+</head>
+<body>
+  <main class="sheet">
+    <section class="details">
+      <div>
+        <div class="field"><span class="label">Driver's Name:</span><span class="value">${esc(driverName)}</span></div>
+        <div class="field"><span class="label">Conductor's Name:</span><span class="value">${esc(conductorName)}</span></div>
+        <div class="field"><span class="label">Dispatcher's Name:</span><span class="value">${esc(dispatcherName)}</span></div>
+      </div>
+      <div>
+        <div class="field"><span class="label">Plate Number:</span><span class="value">${esc(plateNumber)}</span></div>
+        <div class="field"><span class="label">Date:</span><span class="value">${esc(reportDate)}</span></div>
+      </div>
+    </section>
 
-  // Southbound stop records
-  const southboundStops = [
-    { stopName: 'Gen. Luis Ave – Novaliches Bayan', time: '08:30 AM', boarded: 42, alighted: 0, total: 42 },
-    { stopName: 'Quirino Hwy – SM City Novaliches', time: '08:50 AM', boarded: 88, alighted: 32, total: 98 },
-    { stopName: 'Mindanao Ave corner Tandang Sora', time: '09:10 AM', boarded: 35, alighted: 28, total: 105 },
-    { stopName: 'Mindanao Ave corner Congressional', time: '09:25 AM', boarded: 48, alighted: 35, total: 118 },
-    { stopName: 'Mindanao Ave – Tullahan Bridge', time: '09:40 AM', boarded: 28, alighted: 22, total: 124 },
-    { stopName: 'Mindanao Ave corner Road 1', time: '09:52 AM', boarded: 19, alighted: 14, total: 129 },
-    { stopName: 'North Ave – Veterans Hospital', time: '10:05 AM', boarded: 25, alighted: 45, total: 109 },
-    { stopName: 'QC Hall – NHA Interchange', time: '10:20 AM', boarded: 0, alighted: 109, total: 0 }
-  ];
+    <table aria-label="Passenger totals by stop">
+      <thead><tr><th>Stop Name</th><th>Time</th><th>Boarded<br>Passengers</th><th>Alighted<br>Passengers</th><th>Total<br>Passengers</th></tr></thead>
+      <tbody>
+        ${rows.length ? rows.map((row) => `<tr><td>${esc(row.stopName)}</td><td>${esc(formatTime(row.lastEventAt))}</td><td class="number">${Number(row.boarded) || 0}</td><td class="number">${Number(row.alighted) || 0}</td><td class="number">${Number(row.total) || 0}</td></tr>`).join('') : '<tr><td colspan="5">No passenger events recorded for this period.</td></tr>'}
+        <tr class="total-row"><td colspan="2" class="total-label">Total:</td><td class="number">${Number(totals.passengersBoarded) || 0}</td><td class="number">${Number(totals.passengersAlighted) || 0}</td><td class="number">${rows.length ? Number(rows[rows.length - 1]?.total) || 0 : 0}</td></tr>
+      </tbody>
+    </table>
 
-  const nbBoarded = northboundStops.reduce((s, r) => s + r.boarded, 0);
-  const nbAlighted = northboundStops.reduce((s, r) => s + r.alighted, 0);
-  const nbTotal = northboundStops.reduce((s, r) => s + r.total, 0);
-
-  const sbBoarded = southboundStops.reduce((s, r) => s + r.boarded, 0);
-  const sbAlighted = southboundStops.reduce((s, r) => s + r.alighted, 0);
-  const sbTotal = southboundStops.reduce((s, r) => s + r.total, 0);
-
-  reportWindow.document.write(`
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>DITO NA PO - ${timeframe} Trip Summary Report</title>
-        <style>
-          @page { size: portrait; margin: 15mm; }
-          body {
-            font-family: Arial, sans-serif;
-            color: #000000;
-            background: #ffffff;
-            padding: 20px;
-            line-height: 1.4;
-          }
-          .section-banner {
-            font-size: 16px;
-            font-weight: bold;
-            color: #000000;
-            border-bottom: 2px solid #000000;
-            padding-bottom: 4px;
-            margin-top: 10px;
-            margin-bottom: 15px;
-            text-transform: uppercase;
-          }
-          .meta-section {
-            margin-bottom: 25px;
-            font-size: 15px;
-          }
-          .meta-table {
-            width: 100%;
-            border-collapse: collapse;
-          }
-          .meta-table td {
-            padding: 5px 0;
-            vertical-align: top;
-          }
-          .report-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 40px;
-          }
-          .report-table th, .report-table td {
-            border: 1px solid #000000;
-            padding: 8px 10px;
-            text-align: left;
-            font-size: 14px;
-          }
-          .report-table th {
-            font-weight: bold;
-            background-color: #ffffff;
-          }
-          .total-row td {
-            font-weight: bold;
-          }
-          .signature-section {
-            margin-top: 30px;
-            margin-bottom: 40px;
-            width: 100%;
-          }
-          .sig-grid {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 40px;
-          }
-          .sig-col {
-            width: 30%;
-          }
-          .sig-line {
-            border-bottom: 1px solid #777777;
-            margin-bottom: 6px;
-            height: 30px;
-          }
-          .sig-label {
-            font-size: 13px;
-            color: #000000;
-          }
-          .verified-row {
-            display: flex;
-            justify-content: flex-end;
-          }
-          .verified-col {
-            width: 30%;
-          }
-          .page-divider {
-            page-break-before: always;
-            margin-top: 40px;
-          }
-        </style>
-      </head>
-      <body>
-        <!-- SECTION 1: NORTHBOUND TRIPS -->
-        <div class="section-banner">NORTHBOUND TRIPS - ${dateFormatted} (${timeframe} Report)</div>
-        
-        <div class="meta-section">
-          <table class="meta-table">
-            <tr>
-              <td style="width: 55%;">Driver’s Name: ${driverName}</td>
-              <td style="width: 45%;">Plate Number: ${plateNumber}</td>
-            </tr>
-            <tr>
-              <td>Conductor’s Name: ${conductorName}</td>
-              <td>Date: ${dateFormatted}</td>
-            </tr>
-            <tr>
-              <td>Dispatcher’s Name: ${dispatcherName}</td>
-              <td></td>
-            </tr>
-          </table>
-        </div>
-
-        <table class="report-table">
-          <thead>
-            <tr>
-              <th style="width: 32%;">Stop Name</th>
-              <th style="width: 18%;">Time</th>
-              <th style="width: 16%;">Boarded<br/>Passengers</th>
-              <th style="width: 17%;">Alighted<br/>Passengers</th>
-              <th style="width: 17%;">Total<br/>Passengers</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${northboundStops.map(item => `
-              <tr>
-                <td>${item.stopName}</td>
-                <td>${item.time}</td>
-                <td>${item.boarded}</td>
-                <td>${item.alighted}</td>
-                <td>${item.total}</td>
-              </tr>
-            `).join('')}
-            <tr class="total-row">
-              <td style="border-right: none;"></td>
-              <td style="border-left: none; text-align: right;"><strong>Total:</strong></td>
-              <td>${nbBoarded}</td>
-              <td>${nbAlighted}</td>
-              <td>${nbTotal}</td>
-            </tr>
-          </tbody>
-        </table>
-
-        <div class="signature-section">
-          <div class="sig-grid">
-            <div class="sig-col">
-              <div class="sig-line"></div>
-              <div class="sig-label">Driver’s Name and<br/>Signature</div>
-            </div>
-            <div class="sig-col">
-              <div class="sig-line"></div>
-              <div class="sig-label">Conductor’s Name and<br/>Signature</div>
-            </div>
-            <div class="sig-col">
-              <div class="sig-line"></div>
-              <div class="sig-label">Dispatcher’s Name and<br/>Signature</div>
-            </div>
-          </div>
-          <div class="verified-row">
-            <div class="verified-col">
-              <div class="sig-line"></div>
-              <div class="sig-label">Verified by:</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- PAGE DIVIDER FOR SOUTHBOUND TRIPS -->
-        <div class="page-divider"></div>
-
-        <!-- SECTION 2: SOUTHBOUND TRIPS -->
-        <div class="section-banner">SOUTHBOUND TRIPS - ${dateFormatted} (${timeframe} Report)</div>
-        
-        <div class="meta-section">
-          <table class="meta-table">
-            <tr>
-              <td style="width: 55%;">Driver’s Name: ${driverName}</td>
-              <td style="width: 45%;">Plate Number: ${plateNumber}</td>
-            </tr>
-            <tr>
-              <td>Conductor’s Name: ${conductorName}</td>
-              <td>Date: ${dateFormatted}</td>
-            </tr>
-            <tr>
-              <td>Dispatcher’s Name: ${dispatcherName}</td>
-              <td></td>
-            </tr>
-          </table>
-        </div>
-
-        <table class="report-table">
-          <thead>
-            <tr>
-              <th style="width: 32%;">Stop Name</th>
-              <th style="width: 18%;">Time</th>
-              <th style="width: 16%;">Boarded<br/>Passengers</th>
-              <th style="width: 17%;">Alighted<br/>Passengers</th>
-              <th style="width: 17%;">Total<br/>Passengers</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${southboundStops.map(item => `
-              <tr>
-                <td>${item.stopName}</td>
-                <td>${item.time}</td>
-                <td>${item.boarded}</td>
-                <td>${item.alighted}</td>
-                <td>${item.total}</td>
-              </tr>
-            `).join('')}
-            <tr class="total-row">
-              <td style="border-right: none;"></td>
-              <td style="border-left: none; text-align: right;"><strong>Total:</strong></td>
-              <td>${sbBoarded}</td>
-              <td>${sbAlighted}</td>
-              <td>${sbTotal}</td>
-            </tr>
-          </tbody>
-        </table>
-
-        <div class="signature-section">
-          <div class="sig-grid">
-            <div class="sig-col">
-              <div class="sig-line"></div>
-              <div class="sig-label">Driver’s Name and<br/>Signature</div>
-            </div>
-            <div class="sig-col">
-              <div class="sig-line"></div>
-              <div class="sig-label">Conductor’s Name and<br/>Signature</div>
-            </div>
-            <div class="sig-col">
-              <div class="sig-line"></div>
-              <div class="sig-label">Dispatcher’s Name and<br/>Signature</div>
-            </div>
-          </div>
-          <div class="verified-row">
-            <div class="verified-col">
-              <div class="sig-line"></div>
-              <div class="sig-label">Verified by:</div>
-            </div>
-          </div>
-        </div>
-
-        <script>
-          window.onload = function() {
-            window.print();
-          }
-        </script>
-      </body>
-    </html>
-  `);
+    <section class="signatures">
+      <div><div class="signature-name">${esc(driverName)}</div><div class="signature-label">Driver's Name and<br>Signature</div></div>
+      <div><div class="signature-name">${esc(conductorName)}</div><div class="signature-label">Conductor's Name and<br>Signature</div></div>
+      <div><div class="signature-name">${esc(dispatcherName)}</div><div class="signature-label">Dispatcher's Name and<br>Signature</div></div>
+    </section>
+  </main>
+  <script>window.onload = () => window.print();</script>
+</body>
+</html>`);
   reportWindow.document.close();
 }

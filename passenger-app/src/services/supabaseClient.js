@@ -3,6 +3,8 @@
  * Manages Supabase Auth, Profiles, Journeys, and Realtime subscriptions.
  */
 import { createClient } from '@supabase/supabase-js';
+import { isPriorityCategory } from '@shared/qrPassUtils';
+import { ROUTE4_STOPS } from '@shared/route4Stops';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -36,65 +38,20 @@ function getPassengerAuthRedirectUrl() {
 }
 
 export async function fetchConfiguredRoute4Stops() {
-  try {
-    const { data: route, error: routeError } = await supabase.from('routes')
-      .select('id').eq('code', 'R4').maybeSingle();
-    if (routeError) throw routeError;
-    if (!route) {
-      return {
-        success: true,
-        data: ROUTE4_STOPS.map((s, idx) => ({
-          id: `stop-${idx + 1}`,
-          stopNumber: idx + 1,
-          sequenceNumber: idx + 1,
-          name: s.name,
-          lat: Number(s.lat),
-          lng: Number(s.lng)
-        }))
-      };
-    }
-    const { data, error } = await supabase.from('stops')
-      .select('id,sequence_number,name,latitude,longitude')
-      .eq('route_id', route.id).order('sequence_number');
-    if (error) throw error;
-
-    const rows = data || [];
-    const seen = new Set();
-    const canonical = [];
-
-    for (const r of rows) {
-      const clean = String(r.name || '').trim().toLowerCase();
-      if (!seen.has(clean) && canonical.length < 15) {
-        seen.add(clean);
-        canonical.push(r);
-      }
-    }
-
-    const source = canonical.length >= 10 ? canonical : ROUTE4_STOPS;
-    return {
-      success: true,
-      data: source.slice(0, 15).map((stop, idx) => ({
-        id: `stop-${idx + 1}`,
-        stopNumber: idx + 1,
-        sequenceNumber: idx + 1,
-        name: stop.name,
-        lat: Number(stop.latitude || stop.lat),
-        lng: Number(stop.longitude || stop.lng)
-      }))
-    };
-  } catch (err) {
-    return {
-      success: true,
-      data: ROUTE4_STOPS.map((s, idx) => ({
-        id: `stop-${idx + 1}`,
-        stopNumber: idx + 1,
-        sequenceNumber: idx + 1,
-        name: s.name,
-        lat: Number(s.lat),
-        lng: Number(s.lng)
-      }))
-    };
-  }
+  // This shared list is the authoritative source for names, order, and GPS.
+  // Keeping one source prevents stale database coordinates from changing the
+  // stop selected by nearest-stop detection or displayed on the live map.
+  return {
+    success: true,
+    data: ROUTE4_STOPS.map((stop, index) => ({
+      ...stop,
+      id: `stop-${index + 1}`,
+      stopNumber: index + 1,
+      sequenceNumber: index + 1,
+      lat: Number(stop.lat),
+      lng: Number(stop.lng)
+    }))
+  };
 }
 
 // ========================================================
@@ -255,6 +212,9 @@ export async function savePassengerJourney(journeyData) {
       passenger_id: userId,
       qr_token: journeyData.qr_token || null,
       passenger_name: journeyData.passenger_name || null,
+      passenger_category: journeyData.passenger_category || null,
+      passenger_count: Math.max(1, Number(journeyData.passenger_count) || 1),
+      companions: Math.max(0, Number(journeyData.companions) || 0),
       registration_source: 'app',
       trip_id: journeyData.trip_id || null,
       origin_name: journeyData.origin_name,
@@ -399,14 +359,64 @@ export async function fetchCurrentBusLocation(busId) {
 
 export async function fetchTripOccupancy(tripId) {
   try {
-    const { data, error } = await supabase
-      .from('trip_occupancy')
-      .select('*')
-      .eq('trip_id', tripId)
-      .maybeSingle();
+    let occupancyData = null;
 
-    if (error) throw error;
-    return { success: true, data };
+    // 1. Fetch from trip_occupancy view if available
+    try {
+      const { data, error } = await supabase
+        .from('trip_occupancy')
+        .select('*')
+        .eq('trip_id', tripId)
+        .maybeSingle();
+      if (!error && data) occupancyData = data;
+    } catch (_) {}
+
+    // 2. Fetch boarded passengers from passenger_journeys to calculate priority vs regular seat counts
+    let priorityBoarded = 0;
+    let regularBoarded = 0;
+    try {
+      let query = supabase.from('passenger_journeys')
+        .select('passenger_category,passenger_count,status')
+        .eq('status', 'boarded');
+
+      if (tripId && tripId !== 'active-trip') {
+        query = query.eq('trip_id', tripId);
+      }
+
+      const { data: journeys } = await query;
+      if (journeys && journeys.length > 0) {
+        for (const j of journeys) {
+          const count = Math.max(1, Number(j.passenger_count) || 1);
+          if (isPriorityCategory(j.passenger_category)) {
+            priorityBoarded += count;
+          } else {
+            regularBoarded += count;
+          }
+        }
+      }
+    } catch (_) {}
+
+    const totalBoarded = priorityBoarded + regularBoarded;
+    const busCapacity = Number(occupancyData?.bus_capacity) || 50;
+    const currentOnboard = occupancyData?.current_onboard != null ? Number(occupancyData.current_onboard) : totalBoarded;
+    const availableSeats = Math.max(0, busCapacity - currentOnboard);
+    const availablePrioritySeats = Math.max(0, 20 - priorityBoarded);
+    const availableRegularSeats = Math.max(0, 30 - regularBoarded);
+
+    return {
+      success: true,
+      data: {
+        ...(occupancyData || {}),
+        trip_id: tripId,
+        bus_capacity: busCapacity,
+        current_onboard: currentOnboard,
+        available_seats: availableSeats,
+        priority_boarded: priorityBoarded,
+        regular_boarded: regularBoarded,
+        available_priority_seats: availablePrioritySeats,
+        available_regular_seats: availableRegularSeats
+      }
+    };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -417,28 +427,65 @@ export async function fetchActiveTripForRoute(routeCode) {
     const { data: route, error: routeError } = await supabase.from('routes')
       .select('id,code,name').eq('code', routeCode).maybeSingle();
     if (routeError) throw routeError;
-    if (!route) return { success: true, data: null };
+    const routeId = route?.id;
 
-    const { data: trip, error: tripError } = await supabase.from('trips')
-      .select('id,bus_id,route_id,status,started_at')
-      .eq('route_id', route.id).eq('status', 'ongoing')
-      .order('started_at', { ascending: false }).limit(1).maybeSingle();
-    if (tripError) throw tripError;
-    if (!trip) return { success: true, data: null };
+    // Match only the active trip for this route so both apps show the same bus.
+    let trip = null;
+    if (routeId) {
+      const { data: routeTrip } = await supabase.from('trips')
+        .select('id,bus_id,route_id,status,started_at,driver_personnel_id,conductor_personnel_id,dispatcher_personnel_id')
+        .eq('route_id', routeId).eq('status', 'ongoing')
+        .order('started_at', { ascending: false }).limit(1).maybeSingle();
+      if (routeTrip) trip = routeTrip;
+    }
 
-    const [{ data: bus, error: busError }, occupancyResult] = await Promise.all([
-      supabase.from('buses').select('id,plate_number,capacity').eq('id', trip.bus_id).maybeSingle(),
-      fetchTripOccupancy(trip.id)
-    ]);
-    if (busError) throw busError;
-    if (!occupancyResult.success) throw new Error(occupancyResult.error);
-    return { success: true, data: { ...trip, bus: bus || null, occupancy: occupancyResult.data } };
-  } catch (err) { return { success: false, error: err.message }; }
+    if (!trip?.bus_id) return { success: true, data: null };
+    const busId = trip.bus_id;
+
+    // Fetch bus metadata (plate_number, capacity)
+    const { data: bus } = await supabase.from('buses')
+      .select('id,plate_number,capacity').eq('id', busId).maybeSingle();
+
+    const personnelIds = [trip.driver_personnel_id, trip.conductor_personnel_id, trip.dispatcher_personnel_id].filter(Boolean);
+    let personnel = [];
+    if (personnelIds.length) {
+      const { data: personnelRows, error: personnelError } = await supabase
+        .from('operations_personnel')
+        .select('personnel_id,full_name,personnel_type')
+        .in('personnel_id', personnelIds);
+      if (personnelError) throw personnelError;
+      personnel = personnelRows || [];
+    }
+    const nameFor = (type, id) => personnel.find((person) => person.personnel_id === id || person.personnel_type === type)?.full_name || 'Not assigned';
+
+    const tripId = trip.id;
+    const occupancyResult = await fetchTripOccupancy(tripId);
+
+    return {
+      success: true,
+      data: {
+        id: tripId,
+        bus_id: busId,
+        route_id: routeId || trip?.route_id || 'route-4',
+        status: 'ongoing',
+        bus: bus || { id: busId, plate_number: 'QC-BUS-0402', capacity: 50 },
+        personnel: {
+          driverName: nameFor('driver', trip.driver_personnel_id),
+          conductorName: nameFor('conductor', trip.conductor_personnel_id),
+          dispatcherName: nameFor('dispatcher', trip.dispatcher_personnel_id)
+        },
+        occupancy: occupancyResult.data
+      }
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 }
 
 export function subscribeToBusLocation(busId, onUpdate) {
+  if (!busId) return () => {};
   const channel = supabase
-    .channel(`bus_location_${busId}`)
+    .channel(`bus_location_${busId}_${Date.now()}`)
     .on(
       'postgres_changes',
       {
@@ -461,15 +508,29 @@ export function subscribeToBusLocation(busId, onUpdate) {
 }
 
 export function subscribeToTripOccupancy(tripId, onUpdate) {
+  const channelId = `trip_occupancy_${tripId || 'all'}_${Date.now()}`;
   const channel = supabase
-    .channel(`trip_occupancy_${tripId}`)
+    .channel(channelId)
     .on(
       'postgres_changes',
       {
         event: '*',
         schema: 'public',
-        table: 'boarding_events',
-        filter: `trip_id=eq.${tripId}`
+        table: 'boarding_events'
+      },
+      async () => {
+        const occ = await fetchTripOccupancy(tripId);
+        if (occ.success && occ.data) {
+          onUpdate(occ.data);
+        }
+      }
+    )
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'passenger_journeys'
       },
       async () => {
         const occ = await fetchTripOccupancy(tripId);

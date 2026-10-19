@@ -8,7 +8,9 @@
  * Calculates Haversine distance between two (lat, lng) points in kilometers
  */
 export function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  if (!lat1 || !lon1 || !lat2 || !lon2) return 0;
+  const coordinates = [lat1, lon1, lat2, lon2].map(Number);
+  if (!coordinates.every(Number.isFinite)) return Number.POSITIVE_INFINITY;
+  [lat1, lon1, lat2, lon2] = coordinates;
   const R = 6371; // Earth's radius in km
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
@@ -20,6 +22,13 @@ export function calculateDistanceKm(lat1, lon1, lat2, lon2) {
       Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+/**
+ * Calculates distance in meters between two GPS coordinates
+ */
+export function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
+  return calculateDistanceKm(lat1, lon1, lat2, lon2) * 1000;
 }
 
 /**
@@ -47,13 +56,18 @@ export function estimateWalkingTimeMins(distanceKm) {
  * Finds the single nearest bus stop from a list of stops given a user's GPS coordinates
  */
 export function findNearestStop(userLat, userLng, stopsList = []) {
-  if (!userLat || !userLng || !stopsList.length) return null;
+  const latitude = Number(userLat);
+  const longitude = Number(userLng);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !stopsList.length) return null;
 
   let nearest = null;
   let minDistance = Infinity;
 
   stopsList.forEach((stop) => {
-    const dist = calculateDistanceKm(userLat, userLng, stop.lat || stop.latitude, stop.lng || stop.longitude);
+    const stopLat = Number(stop.lat ?? stop.latitude);
+    const stopLng = Number(stop.lng ?? stop.longitude);
+    if (!Number.isFinite(stopLat) || !Number.isFinite(stopLng)) return;
+    const dist = calculateDistanceKm(latitude, longitude, stopLat, stopLng);
     if (dist < minDistance) {
       minDistance = dist;
       nearest = {
@@ -66,4 +80,48 @@ export function findNearestStop(userLat, userLng, stopsList = []) {
   });
 
   return nearest;
+}
+
+/**
+ * Samples fresh browser GPS readings and returns the most accurate position.
+ * A watch is used because the first mobile reading is often a coarse cached fix.
+ */
+export function getAccurateCurrentPosition({ desiredAccuracyMeters = 20, timeoutMs = 15000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('Geolocation is not supported by this browser.'));
+      return;
+    }
+
+    let bestPosition = null;
+    let watchId = null;
+    let finished = false;
+
+    const finish = (position, error) => {
+      if (finished) return;
+      finished = true;
+      if (watchId != null) navigator.geolocation.clearWatch(watchId);
+      clearTimeout(timerId);
+      if (position) resolve(position);
+      else reject(error || new Error('A current GPS position could not be determined.'));
+    };
+
+    const timerId = setTimeout(() => {
+      finish(bestPosition, new Error('Location detection timed out.'));
+    }, timeoutMs);
+
+    watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const accuracy = Number(position.coords.accuracy);
+        if (!bestPosition || accuracy < Number(bestPosition.coords.accuracy)) {
+          bestPosition = position;
+        }
+        if (Number.isFinite(accuracy) && accuracy <= desiredAccuracyMeters) {
+          finish(position);
+        }
+      },
+      (error) => finish(bestPosition, error),
+      { enableHighAccuracy: true, maximumAge: 0, timeout: timeoutMs }
+    );
+  });
 }

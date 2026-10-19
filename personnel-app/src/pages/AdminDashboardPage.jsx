@@ -47,7 +47,7 @@ export function AdminDashboardPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
-      <header className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap', background: 'linear-gradient(135deg, rgba(8,145,178,.18), rgba(15,23,42,.92))' }}>
+      <header className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap', background: '#0f2a3a' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem', color: '#22d3ee' }}><ShieldCheck size={22} /><span style={{ fontSize: '.78rem', fontWeight: 800, letterSpacing: '.08em', textTransform: 'uppercase' }}>Administration</span></div>
           <h1 style={{ margin: '.55rem 0 .25rem', fontSize: '1.7rem' }}>Registered Personnel</h1>
