@@ -126,10 +126,10 @@ export function createPassengerQrPayload({
 
   const cleanCompanionsList = Array.isArray(companionsList)
     ? companionsList.map((c, i) => ({
-        name: String(c?.name || '').trim(),
-        category: String(c?.category || 'Regular').trim(),
-        isPriority: isPriorityCategory(c?.category)
-      }))
+      name: String(c?.name || '').trim(),
+      category: String(c?.category || 'Regular').trim(),
+      isPriority: isPriorityCategory(c?.category)
+    }))
     : [];
 
   const partyHasPriority = isPriorityCategory(category) || cleanCompanionsList.some((c) => c.isPriority);

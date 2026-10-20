@@ -1,0 +1,465 @@
+{
+  "metadata": {
+    "model": "RandomForestRegressor",
+    "trees": 150,
+    "r2Score": 0.89,
+    "mae": 1.6,
+    "generatedAt": "2026-10-21T02:39:16.423952"
+  },
+  "byDirectionAndStop": {
+    "Northbound": {
+      "Quezon City Hall \u2013 NHA Interchange": {
+        "stopNumber": 1,
+        "sequenceNumber": 1,
+        "stopName": "Quezon City Hall \u2013 NHA Interchange",
+        "shortName": "QC Hall",
+        "isTerminal": false,
+        "overallRecommended": 40,
+        "recommendedRange": "32-44 pax",
+        "byPeriod": {
+          "morning_peak": 32,
+          "midday": 44,
+          "evening_peak": 44,
+          "night": 42
+        }
+      },
+      "North Avenue \u2013 Veterans Hospital / Vertis North": {
+        "stopNumber": 2,
+        "sequenceNumber": 2,
+        "stopName": "North Avenue \u2013 Veterans Hospital / Vertis North",
+        "shortName": "North Ave / VMMC",
+        "isTerminal": false,
+        "overallRecommended": 4,
+        "recommendedRange": "3-4 pax",
+        "byPeriod": {
+          "morning_peak": 4,
+          "midday": 3,
+          "evening_peak": 4,
+          "night": 3
+        }
+      },
+      "Mindanao Avenue corner Road 1": {
+        "stopNumber": 3,
+        "sequenceNumber": 3,
+        "stopName": "Mindanao Avenue corner Road 1",
+        "shortName": "Mindanao cor. Road 1",
+        "isTerminal": false,
+        "overallRecommended": 3,
+        "recommendedRange": "3-4 pax",
+        "byPeriod": {
+          "morning_peak": 4,
+          "midday": 3,
+          "evening_peak": 3,
+          "night": 4
+        }
+      },
+      "Mindanao Avenue \u2013 Tullahan Bridge": {
+        "stopNumber": 4,
+        "sequenceNumber": 4,
+        "stopName": "Mindanao Avenue \u2013 Tullahan Bridge",
+        "shortName": "Tullahan Bridge",
+        "isTerminal": false,
+        "overallRecommended": 0,
+        "recommendedRange": "0 pax",
+        "byPeriod": {
+          "morning_peak": 0,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 0
+        }
+      },
+      "Mindanao Avenue corner Congressional Avenue": {
+        "stopNumber": 5,
+        "sequenceNumber": 5,
+        "stopName": "Mindanao Avenue corner Congressional Avenue",
+        "shortName": "Mindanao cor. Congressional",
+        "isTerminal": false,
+        "overallRecommended": 1,
+        "recommendedRange": "0-1 pax",
+        "byPeriod": {
+          "morning_peak": 1,
+          "midday": 1,
+          "evening_peak": 0,
+          "night": 1
+        }
+      },
+      "Mindanao Avenue corner Tandang Sora Avenue": {
+        "stopNumber": 6,
+        "sequenceNumber": 6,
+        "stopName": "Mindanao Avenue corner Tandang Sora Avenue",
+        "shortName": "Tandang Sora Ave",
+        "isTerminal": false,
+        "overallRecommended": 0,
+        "recommendedRange": "0-1 pax",
+        "byPeriod": {
+          "morning_peak": 0,
+          "midday": 0,
+          "evening_peak": 1,
+          "night": 1
+        }
+      },
+      "Mindanao Avenue corner D. Mu\u00f1oz Street": {
+        "stopNumber": 7,
+        "sequenceNumber": 7,
+        "stopName": "Mindanao Avenue corner D. Mu\u00f1oz Street",
+        "shortName": "D. Mu\u00f1oz St",
+        "isTerminal": false,
+        "overallRecommended": 0,
+        "recommendedRange": "0-1 pax",
+        "byPeriod": {
+          "morning_peak": 1,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 0
+        }
+      },
+      "Mindanao Avenue corner Old Sauyo Road": {
+        "stopNumber": 8,
+        "sequenceNumber": 8,
+        "stopName": "Mindanao Avenue corner Old Sauyo Road",
+        "shortName": "Old Sauyo Rd",
+        "isTerminal": false,
+        "overallRecommended": 0,
+        "recommendedRange": "0 pax",
+        "byPeriod": {
+          "morning_peak": 0,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 0
+        }
+      },
+      "Mindanao Avenue corner Quirino Highway \u2013 Interchange": {
+        "stopNumber": 9,
+        "sequenceNumber": 9,
+        "stopName": "Mindanao Avenue corner Quirino Highway \u2013 Interchange",
+        "shortName": "Mindanao - Quirino Interchange",
+        "isTerminal": false,
+        "overallRecommended": 2,
+        "recommendedRange": "1-2 pax",
+        "byPeriod": {
+          "morning_peak": 2,
+          "midday": 1,
+          "evening_peak": 2,
+          "night": 2
+        }
+      },
+      "Quezon City University Main Campus / Novaliches District Hospital": {
+        "stopNumber": 10,
+        "sequenceNumber": 10,
+        "stopName": "Quezon City University Main Campus / Novaliches District Hospital",
+        "shortName": "QCU / Novaliches Hospital",
+        "isTerminal": false,
+        "overallRecommended": 3,
+        "recommendedRange": "2-4 pax",
+        "byPeriod": {
+          "morning_peak": 2,
+          "midday": 3,
+          "evening_peak": 4,
+          "night": 2
+        }
+      },
+      "Quirino Highway \u2013 SM City Novaliches": {
+        "stopNumber": 11,
+        "sequenceNumber": 11,
+        "stopName": "Quirino Highway \u2013 SM City Novaliches",
+        "shortName": "SM Novaliches",
+        "isTerminal": false,
+        "overallRecommended": 3,
+        "recommendedRange": "2-4 pax",
+        "byPeriod": {
+          "morning_peak": 2,
+          "midday": 3,
+          "evening_peak": 4,
+          "night": 3
+        }
+      },
+      "Quirino Highway corner Forest Hills Drive": {
+        "stopNumber": 12,
+        "sequenceNumber": 12,
+        "stopName": "Quirino Highway corner Forest Hills Drive",
+        "shortName": "Forest Hills Drive",
+        "isTerminal": false,
+        "overallRecommended": 2,
+        "recommendedRange": "1-2 pax",
+        "byPeriod": {
+          "morning_peak": 2,
+          "midday": 2,
+          "evening_peak": 1,
+          "night": 1
+        }
+      },
+      "General Luis Avenue \u2013 Novaliches Bayan": {
+        "stopNumber": 13,
+        "sequenceNumber": 13,
+        "stopName": "General Luis Avenue \u2013 Novaliches Bayan",
+        "shortName": "Novaliches Bayan",
+        "isTerminal": false,
+        "overallRecommended": 3,
+        "recommendedRange": "3-4 pax",
+        "byPeriod": {
+          "morning_peak": 3,
+          "midday": 3,
+          "evening_peak": 4,
+          "night": 3
+        }
+      },
+      "General Luis Avenue corner Banahaw Street": {
+        "stopNumber": 14,
+        "sequenceNumber": 14,
+        "stopName": "General Luis Avenue corner Banahaw Street",
+        "shortName": "Banahaw St",
+        "isTerminal": false,
+        "overallRecommended": 0,
+        "recommendedRange": "0 pax",
+        "byPeriod": {
+          "morning_peak": 0,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 0
+        }
+      },
+      "General Luis Avenue corner SB Road": {
+        "stopNumber": 15,
+        "sequenceNumber": 15,
+        "stopName": "General Luis Avenue corner SB Road",
+        "shortName": "SB Road Terminal",
+        "isTerminal": true,
+        "overallRecommended": 0,
+        "recommendedRange": "0 (Terminus)",
+        "byPeriod": {
+          "morning_peak": 0,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 0
+        }
+      }
+    },
+    "Southbound": {
+      "General Luis Avenue corner SB Road": {
+        "stopNumber": 15,
+        "sequenceNumber": 1,
+        "stopName": "General Luis Avenue corner SB Road",
+        "shortName": "SB Road Terminal",
+        "isTerminal": false,
+        "overallRecommended": 14,
+        "recommendedRange": "12-16 pax",
+        "byPeriod": {
+          "morning_peak": 15,
+          "midday": 16,
+          "evening_peak": 12,
+          "night": 14
+        }
+      },
+      "General Luis Avenue corner Banahaw Street": {
+        "stopNumber": 14,
+        "sequenceNumber": 2,
+        "stopName": "General Luis Avenue corner Banahaw Street",
+        "shortName": "Banahaw St",
+        "isTerminal": false,
+        "overallRecommended": 6,
+        "recommendedRange": "5-7 pax",
+        "byPeriod": {
+          "morning_peak": 7,
+          "midday": 7,
+          "evening_peak": 6,
+          "night": 5
+        }
+      },
+      "General Luis Avenue \u2013 Novaliches Bayan": {
+        "stopNumber": 13,
+        "sequenceNumber": 3,
+        "stopName": "General Luis Avenue \u2013 Novaliches Bayan",
+        "shortName": "Novaliches Bayan",
+        "isTerminal": false,
+        "overallRecommended": 16,
+        "recommendedRange": "12-18 pax",
+        "byPeriod": {
+          "morning_peak": 17,
+          "midday": 18,
+          "evening_peak": 15,
+          "night": 12
+        }
+      },
+      "Quirino Highway corner Forest Hills Drive": {
+        "stopNumber": 12,
+        "sequenceNumber": 4,
+        "stopName": "Quirino Highway corner Forest Hills Drive",
+        "shortName": "Forest Hills Drive",
+        "isTerminal": false,
+        "overallRecommended": 5,
+        "recommendedRange": "2-6 pax",
+        "byPeriod": {
+          "morning_peak": 6,
+          "midday": 5,
+          "evening_peak": 4,
+          "night": 2
+        }
+      },
+      "Quirino Highway \u2013 SM City Novaliches": {
+        "stopNumber": 11,
+        "sequenceNumber": 5,
+        "stopName": "Quirino Highway \u2013 SM City Novaliches",
+        "shortName": "SM Novaliches",
+        "isTerminal": false,
+        "overallRecommended": 6,
+        "recommendedRange": "5-7 pax",
+        "byPeriod": {
+          "morning_peak": 7,
+          "midday": 5,
+          "evening_peak": 5,
+          "night": 5
+        }
+      },
+      "Quezon City University Main Campus / Novaliches District Hospital": {
+        "stopNumber": 10,
+        "sequenceNumber": 6,
+        "stopName": "Quezon City University Main Campus / Novaliches District Hospital",
+        "shortName": "QCU / Novaliches Hospital",
+        "isTerminal": false,
+        "overallRecommended": 7,
+        "recommendedRange": "6-8 pax",
+        "byPeriod": {
+          "morning_peak": 6,
+          "midday": 8,
+          "evening_peak": 8,
+          "night": 6
+        }
+      },
+      "Mindanao Avenue corner Quirino Highway \u2013 Interchange": {
+        "stopNumber": 9,
+        "sequenceNumber": 7,
+        "stopName": "Mindanao Avenue corner Quirino Highway \u2013 Interchange",
+        "shortName": "Mindanao - Quirino Interchange",
+        "isTerminal": false,
+        "overallRecommended": 3,
+        "recommendedRange": "3 pax",
+        "byPeriod": {
+          "morning_peak": 3,
+          "midday": 3,
+          "evening_peak": 3,
+          "night": 3
+        }
+      },
+      "Mindanao Avenue corner Old Sauyo Road": {
+        "stopNumber": 8,
+        "sequenceNumber": 8,
+        "stopName": "Mindanao Avenue corner Old Sauyo Road",
+        "shortName": "Old Sauyo Rd",
+        "isTerminal": false,
+        "overallRecommended": 1,
+        "recommendedRange": "0-2 pax",
+        "byPeriod": {
+          "morning_peak": 2,
+          "midday": 0,
+          "evening_peak": 1,
+          "night": 1
+        }
+      },
+      "Mindanao Avenue corner D. Mu\u00f1oz Street": {
+        "stopNumber": 7,
+        "sequenceNumber": 9,
+        "stopName": "Mindanao Avenue corner D. Mu\u00f1oz Street",
+        "shortName": "D. Mu\u00f1oz St",
+        "isTerminal": false,
+        "overallRecommended": 0,
+        "recommendedRange": "0-1 pax",
+        "byPeriod": {
+          "morning_peak": 0,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 1
+        }
+      },
+      "Mindanao Avenue corner Tandang Sora Avenue": {
+        "stopNumber": 6,
+        "sequenceNumber": 10,
+        "stopName": "Mindanao Avenue corner Tandang Sora Avenue",
+        "shortName": "Tandang Sora Ave",
+        "isTerminal": false,
+        "overallRecommended": 1,
+        "recommendedRange": "1 pax",
+        "byPeriod": {
+          "morning_peak": 1,
+          "midday": 1,
+          "evening_peak": 1,
+          "night": 1
+        }
+      },
+      "Mindanao Avenue corner Congressional Avenue": {
+        "stopNumber": 5,
+        "sequenceNumber": 11,
+        "stopName": "Mindanao Avenue corner Congressional Avenue",
+        "shortName": "Mindanao cor. Congressional",
+        "isTerminal": false,
+        "overallRecommended": 0,
+        "recommendedRange": "0-2 pax",
+        "byPeriod": {
+          "morning_peak": 0,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 2
+        }
+      },
+      "Mindanao Avenue \u2013 Tullahan Bridge": {
+        "stopNumber": 4,
+        "sequenceNumber": 12,
+        "stopName": "Mindanao Avenue \u2013 Tullahan Bridge",
+        "shortName": "Tullahan Bridge",
+        "isTerminal": false,
+        "overallRecommended": 0,
+        "recommendedRange": "0-1 pax",
+        "byPeriod": {
+          "morning_peak": 0,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 1
+        }
+      },
+      "Mindanao Avenue corner Road 1": {
+        "stopNumber": 3,
+        "sequenceNumber": 13,
+        "stopName": "Mindanao Avenue corner Road 1",
+        "shortName": "Mindanao cor. Road 1",
+        "isTerminal": false,
+        "overallRecommended": 1,
+        "recommendedRange": "0-2 pax",
+        "byPeriod": {
+          "morning_peak": 1,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 2
+        }
+      },
+      "North Avenue \u2013 Veterans Hospital / Vertis North": {
+        "stopNumber": 2,
+        "sequenceNumber": 14,
+        "stopName": "North Avenue \u2013 Veterans Hospital / Vertis North",
+        "shortName": "North Ave / VMMC",
+        "isTerminal": false,
+        "overallRecommended": 3,
+        "recommendedRange": "3-4 pax",
+        "byPeriod": {
+          "morning_peak": 3,
+          "midday": 3,
+          "evening_peak": 4,
+          "night": 3
+        }
+      },
+      "Quezon City Hall \u2013 NHA Interchange": {
+        "stopNumber": 1,
+        "sequenceNumber": 15,
+        "stopName": "Quezon City Hall \u2013 NHA Interchange",
+        "shortName": "QC Hall",
+        "isTerminal": true,
+        "overallRecommended": 0,
+        "recommendedRange": "0 (Terminus)",
+        "byPeriod": {
+          "morning_peak": 0,
+          "midday": 0,
+          "evening_peak": 0,
+          "night": 0
+        }
+      }
+    }
+  }
+}

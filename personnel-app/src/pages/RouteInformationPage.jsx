@@ -28,12 +28,13 @@ import {
   fetchLatestBridgeGps
 } from '../services/busAnnouncerBridge';
 import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, applyRoute4CoordinateOverrides, resolveRoute4Stop, validateTripDirection, detectPassengerDirection, getStopIndex } from '@shared/route4Stops';
+import { getStopRecommendedBoarding } from '@shared/queueAndBoardingService';
 import { parsePassengerQRCode, isPriorityCategory, hasPriorityInParty } from '@shared/qrPassUtils';
 import { QrCameraScannerModal } from '../components/QrCameraScannerModal';
 import {
   Users, MapPin, ArrowUp, ArrowDown, Play, Pause,
   RotateCcw, ShieldCheck, UserCheck,
-  Volume2, VolumeX, Camera
+  Volume2, VolumeX, Camera, Sparkles
 } from 'lucide-react';
 
 export function RouteInformationPage() {
@@ -1351,11 +1352,25 @@ export function RouteInformationPage() {
       <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '0.75rem', overflow: 'visible', minHeight: '0' }}>
         {/* Sequence Title & Controls */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border-color)', flexShrink: 0, flexWrap: 'wrap', gap: '.5rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
             <MapPin size={20} color="#06b6d4" />
             <h2 style={{ fontSize: '1.15rem', margin: 0 }}>
               Route Stop Sequence ({direction} View: {direction === 'Northbound' ? 'QC Hall to Gen. Luis' : 'Gen. Luis to QC Hall'})
             </h2>
+            <span style={{
+              fontSize: '0.72rem',
+              fontWeight: 700,
+              padding: '0.15rem 0.55rem',
+              borderRadius: '9999px',
+              backgroundColor: 'rgba(6, 182, 212, 0.12)',
+              color: '#06b6d4',
+              border: '1px solid rgba(6, 182, 212, 0.35)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.25rem'
+            }} title="Boarding numbers calculated by Random Forest Regressor trained on qcbus_data_modeling.csv">
+              <Sparkles size={11} /> ML Boarding Guidance Active
+            </span>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -1397,6 +1412,7 @@ export function RouteInformationPage() {
             const boardedCount = passengersBoardedAt(s.name);
             const alightingCount = passengersAlightingAt(s.name);
             const completedAlightedCount = passengersCompletedAlightedAt(s.name);
+            const recBoarding = getStopRecommendedBoarding(s.name, direction, currentTime);
 
             return (
               <div
@@ -1445,26 +1461,56 @@ export function RouteInformationPage() {
                   </div>
                 </div>
 
-                {/* BOARDED & ALIGHTING BADGES */}
-                <div style={{ display: 'flex', gap: '.3rem', marginTop: '.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                  {boardedCount > 0 && (
-                    <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(16,185,129,.2)', border: '1px solid #10b981', color: '#34d399', fontSize: '.68rem', fontWeight: 700 }} title={`${boardedCount} boarded at this stop`}>
-                      ↑ {boardedCount} boarded
+                <div>
+                  {/* BOARDED & ALIGHTING BADGES */}
+                  <div style={{ display: 'flex', gap: '.3rem', marginTop: '.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                    {boardedCount > 0 && (
+                      <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(16,185,129,.2)', border: '1px solid #10b981', color: '#34d399', fontSize: '.68rem', fontWeight: 700 }} title={`${boardedCount} boarded at this stop`}>
+                        ↑ {boardedCount} boarded
+                      </span>
+                    )}
+                    {alightingCount > 0 && (
+                      <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(239,68,68,.18)', border: '1px solid #ef4444', color: '#f87171', fontSize: '.68rem', fontWeight: 800 }} title={`${alightingCount} passengers to alight here`}>
+                        ↓ {alightingCount} alighting
+                      </span>
+                    )}
+                    {completedAlightedCount > 0 && (
+                      <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(148,163,184,.15)', border: '1px solid #64748b', color: '#94a3b8', fontSize: '.68rem', fontWeight: 600 }} title={`${completedAlightedCount} passengers already alighted here`}>
+                        ✓ {completedAlightedCount} alighted
+                      </span>
+                    )}
+                    {boardedCount === 0 && alightingCount === 0 && completedAlightedCount === 0 && (
+                      <span style={{ fontSize: '.65rem', color: '#64748b' }}>0 pax</span>
+                    )}
+                  </div>
+
+                  {/* RECOMMENDED PASSENGERS TO BE BOARDED (Random Forest Model) */}
+                  <div
+                    style={{
+                      marginTop: '0.45rem',
+                      paddingTop: '0.35rem',
+                      borderTop: '1px dashed var(--border-color)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}
+                    title={`Random Forest Recommended Boarding for ${s.name} (${direction}, ${recBoarding?.currentPeriodLabel || 'Nominal'}): ${recBoarding?.currentPeriodRecommended ?? recBoarding?.overallRecommended} pax (Operational Range: ${recBoarding?.recommendedRange})`}
+                  >
+                    <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: '0.2rem', fontWeight: 600 }}>
+                      <Users size={11} color="#06b6d4" /> Rec. Board:
                     </span>
-                  )}
-                  {alightingCount > 0 && (
-                    <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(239,68,68,.18)', border: '1px solid #ef4444', color: '#f87171', fontSize: '.68rem', fontWeight: 800 }} title={`${alightingCount} passengers to alight here`}>
-                      ↓ {alightingCount} alighting
+                    <span style={{
+                      fontSize: '0.74rem',
+                      fontWeight: 800,
+                      color: recBoarding?.isTerminal ? '#94a3b8' : '#38bdf8',
+                      backgroundColor: recBoarding?.isTerminal ? 'rgba(148, 163, 184, 0.12)' : 'rgba(6, 182, 212, 0.16)',
+                      border: recBoarding?.isTerminal ? '1px solid #475569' : '1px solid #06b6d4',
+                      padding: '0.1rem 0.4rem',
+                      borderRadius: '4px'
+                    }}>
+                      {recBoarding?.isTerminal ? '0 (Terminus)' : `${recBoarding?.currentPeriodRecommended ?? recBoarding?.overallRecommended} pax`}
                     </span>
-                  )}
-                  {completedAlightedCount > 0 && (
-                    <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(148,163,184,.15)', border: '1px solid #64748b', color: '#94a3b8', fontSize: '.68rem', fontWeight: 600 }} title={`${completedAlightedCount} passengers already alighted here`}>
-                      ✓ {completedAlightedCount} alighted
-                    </span>
-                  )}
-                  {boardedCount === 0 && alightingCount === 0 && completedAlightedCount === 0 && (
-                    <span style={{ fontSize: '.65rem', color: '#64748b' }}>0 pax</span>
-                  )}
+                  </div>
                 </div>
               </div>
             );

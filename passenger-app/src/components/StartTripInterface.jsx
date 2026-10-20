@@ -13,6 +13,7 @@ import {
   BarChart3, TrendingUp, Leaf, Award, Calendar, Sparkles, DollarSign, Activity, Trash2
 } from 'lucide-react';
 import { QC_ROUTES } from '../mockData';
+import { StopQueuePredictor } from './StopQueuePredictor';
 import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, getStopIndex, resolveRoute4Stop } from '@shared/route4Stops';
 import { generateDailyTripId, createPassengerQrPayload, isPriorityCategory, hasPriorityInParty } from '@shared/qrPassUtils';
 import { drawQRCodeCanvas, downloadQRImage } from '../utils/qrGenerator';
@@ -1397,6 +1398,11 @@ export function StartTripInterface({
                         </div>
                       </div>
                     </div>
+                  )}
+
+                  {/* Random Forest Model Predicted Queue at Selected Starting Stop */}
+                  {startStop && (
+                    <StopQueuePredictor selectedStop={startStop} direction={direction} />
                   )}
 
                   <button
