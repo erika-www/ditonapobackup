@@ -76,6 +76,17 @@ export function extractStopName(s) {
 }
 
 /**
+ * Returns true if the party (passenger and/or any companion) has at least one priority member
+ */
+export function hasPriorityInParty(passengerCategory, companionsList = []) {
+  if (isPriorityCategory(passengerCategory)) return true;
+  if (Array.isArray(companionsList)) {
+    return companionsList.some((c) => isPriorityCategory(c?.category));
+  }
+  return false;
+}
+
+/**
  * Creates the canonical, fully readable JSON QR payload string
  */
 export function createPassengerQrPayload({
@@ -85,7 +96,9 @@ export function createPassengerQrPayload({
   boardingStop = '',
   destinationStop = '',
   busPlate = '',
-  companions = 0
+  companions = 0,
+  direction = 'Northbound',
+  companionsList = []
 }) {
   const now = new Date();
   const mm = String(now.getMonth() + 1).padStart(2, '0');
@@ -100,15 +113,33 @@ export function createPassengerQrPayload({
   const totalPax = Math.max(1, Number(count) || (companionsCount + 1));
   const bStop = extractStopName(boardingStop);
   const dStop = extractStopName(destinationStop);
+  const normalizedDirection = String(direction || 'Northbound').trim().toLowerCase().includes('south')
+    ? 'Southbound'
+    : 'Northbound';
+
+  const cleanCompanionsList = Array.isArray(companionsList)
+    ? companionsList.map((c, i) => ({
+        name: String(c?.name || '').trim(),
+        category: String(c?.category || 'Regular').trim(),
+        isPriority: isPriorityCategory(c?.category)
+      }))
+    : [];
+
+  const partyHasPriority = isPriorityCategory(category) || cleanCompanionsList.some((c) => c.isPriority);
 
   const payload = {
     tripId: resolvedTripId,
     passengerCategory: category || 'Regular',
     category: category || 'Regular',
     isPriority: isPriorityCategory(category),
+    hasPriorityInParty: partyHasPriority,
     companions: companionsCount,
+    companionsList: cleanCompanionsList,
     count: totalPax,
     totalPassengers: totalPax,
+    direction: normalizedDirection,
+    tripDirection: normalizedDirection,
+    routeDirection: normalizedDirection,
     boardingStop: bStop,
     destinationStop: dStop,
     boarding_stop: bStop,
@@ -146,6 +177,11 @@ export function parsePassengerQRCode(raw) {
     o.endStop || o.end_stop || o.dropoffStop || o.dropoff_stop || o.dropoff ||
     o.alighting || ''
   );
+  const getDirection = (o) => {
+    const rawDir = o.direction || o.tripDirection || o.routeDirection || o.trip_direction || o.bound || '';
+    if (!rawDir) return 'Northbound';
+    return String(rawDir).trim().toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
+  };
 
   // 0. Direct object input
   if (typeof raw === 'object' && raw !== null) {
@@ -155,13 +191,20 @@ export function parsePassengerQRCode(raw) {
     const category = raw.category || raw.passengerCategory || raw.passenger_category || 'Regular';
     const boardingStop = getOrigin(raw);
     const destinationStop = getDest(raw);
+    const direction = getDirection(raw);
+    const companionsList = Array.isArray(raw.companionsList) ? raw.companionsList : [];
 
     return {
       tripId: String(tripId).trim(),
       count: isNaN(count) || count < 1 ? 1 : count,
       companions: isNaN(companions) || companions < 0 ? 0 : companions,
+      companionsList,
       category: String(category).trim(),
       isPriority: isPriorityCategory(category),
+      hasPriorityInParty: hasPriorityInParty(category, companionsList),
+      direction,
+      tripDirection: direction,
+      routeDirection: direction,
       boardingStop,
       destinationStop,
       busPlate: String(raw.busPlate || raw.plateNumber || raw.bus_plate || '').trim(),
@@ -187,13 +230,20 @@ export function parsePassengerQRCode(raw) {
       const category = data.category || data.passengerCategory || data.passenger_category || 'Regular';
       const boardingStop = getOrigin(data);
       const destinationStop = getDest(data);
+      const direction = getDirection(data);
+      const companionsList = Array.isArray(data.companionsList) ? data.companionsList : [];
 
       return {
         tripId: String(tripId).trim(),
         count: isNaN(count) || count < 1 ? 1 : count,
         companions: isNaN(companions) || companions < 0 ? 0 : companions,
+        companionsList,
         category: String(category).trim(),
         isPriority: isPriorityCategory(category),
+        hasPriorityInParty: hasPriorityInParty(category, companionsList),
+        direction,
+        tripDirection: direction,
+        routeDirection: direction,
         boardingStop,
         destinationStop,
         busPlate: String(data.busPlate || data.plateNumber || data.bus_plate || '').trim(),
@@ -209,16 +259,23 @@ export function parsePassengerQRCode(raw) {
   const destMatch = str.match(/(?:Destination Stop|Destination|Alighting Stop|Alighting|Dropoff|To|End Stop|End):\s*([^\r\n,]+)/i);
   const countMatch = str.match(/(?:Count|Passengers|Pax|Seats|Qty):\s*([0-9]+)/i);
   const busMatch = str.match(/(?:Assigned Bus|Bus Plate|Bus|Unit):\s*([^\r\n,]+)/i);
+  const dirMatch = str.match(/(?:Direction|Heading|Bound):\s*([^\r\n,]+)/i);
 
   if (tripIdMatch || boardMatch || destMatch) {
     const category = catMatch ? catMatch[1].trim() : 'Regular';
     const count = countMatch ? Number.parseInt(countMatch[1], 10) : 1;
+    const direction = dirMatch && dirMatch[1].toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
     return {
       tripId: tripIdMatch ? tripIdMatch[1].trim() : (str.match(/\b([0-9]{6}-[0-9]{5})\b/)?.[1] || generateDailyTripId()),
       count: isNaN(count) || count < 1 ? 1 : count,
       companions: count > 1 ? count - 1 : 0,
+      companionsList: [],
       category,
       isPriority: isPriorityCategory(category),
+      hasPriorityInParty: isPriorityCategory(category),
+      direction,
+      tripDirection: direction,
+      routeDirection: direction,
       boardingStop: boardMatch ? extractStopName(boardMatch[1]) : '',
       destinationStop: destMatch ? extractStopName(destMatch[1]) : '',
       busPlate: busMatch ? busMatch[1].trim() : '',
@@ -226,7 +283,7 @@ export function parsePassengerQRCode(raw) {
     };
   }
 
-  // 3. Pipe-delimited string (e.g. QCBUS|101526-00001|1|Senior Citizen|Stop 1|Stop 11)
+  // 3. Pipe-delimited string (e.g. QCBUS|101526-00001|1|Senior Citizen|Stop 1|Stop 11|Northbound)
   if (str.includes('|')) {
     const parts = str.split('|').map((p) => p.trim());
     const idIdx = parts.findIndex((p) => /^\d{6}-\d{5}$/.test(p));
@@ -236,12 +293,19 @@ export function parsePassengerQRCode(raw) {
       const category = parts[idIdx + 2] || 'Regular';
       const boardingStop = extractStopName(parts[idIdx + 3]) || '';
       const destinationStop = extractStopName(parts[idIdx + 4]) || '';
+      const rawDir = parts[idIdx + 5] || '';
+      const direction = rawDir.toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
       return {
         tripId,
         count: isNaN(count) || count < 1 ? 1 : count,
         companions: count > 1 ? count - 1 : 0,
+        companionsList: [],
         category,
         isPriority: isPriorityCategory(category),
+        hasPriorityInParty: isPriorityCategory(category),
+        direction,
+        tripDirection: direction,
+        routeDirection: direction,
         boardingStop,
         destinationStop,
         busPlate: '',
@@ -257,8 +321,13 @@ export function parsePassengerQRCode(raw) {
       tripId: standaloneId[1],
       count: 1,
       companions: 0,
+      companionsList: [],
       category: 'Regular',
       isPriority: false,
+      hasPriorityInParty: false,
+      direction: 'Northbound',
+      tripDirection: 'Northbound',
+      routeDirection: 'Northbound',
       boardingStop: '',
       destinationStop: '',
       busPlate: '',
@@ -270,8 +339,13 @@ export function parsePassengerQRCode(raw) {
     tripId: str.slice(0, 32),
     count: 1,
     companions: 0,
+    companionsList: [],
     category: 'Regular',
     isPriority: false,
+    hasPriorityInParty: false,
+    direction: 'Northbound',
+    tripDirection: 'Northbound',
+    routeDirection: 'Northbound',
     boardingStop: '',
     destinationStop: '',
     busPlate: '',

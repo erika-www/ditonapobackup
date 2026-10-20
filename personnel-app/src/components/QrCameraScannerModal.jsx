@@ -166,18 +166,31 @@ export function QrCameraScannerModal({
     animationFrameRef.current = requestAnimationFrame(scanFrame);
   };
 
+  const dismissKeyboard = () => {
+    if (typeof document !== 'undefined') {
+      if (document.activeElement && typeof document.activeElement.blur === 'function') {
+        document.activeElement.blur();
+      }
+      if (window.getSelection) {
+        window.getSelection()?.removeAllRanges();
+      }
+    }
+  };
+
   const handleDetectedCode = (decodedText) => {
     isScanningRef.current = false;
     playBeep();
     setScanSuccessText('QR Code Read Successfully!');
+    dismissKeyboard();
 
     if (onScan) {
       onScan(decodedText);
     }
 
     setTimeout(() => {
+      dismissKeyboard();
       onClose();
-    }, 600);
+    }, 500);
   };
 
   const toggleCameraFacing = () => {
@@ -188,10 +201,12 @@ export function QrCameraScannerModal({
     e.preventDefault();
     const clean = manualCode.trim();
     if (!clean) return;
+    dismissKeyboard();
     playBeep();
     if (onScan) {
       onScan(clean);
     }
+    dismissKeyboard();
     onClose();
   };
 

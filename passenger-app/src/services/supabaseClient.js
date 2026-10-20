@@ -213,10 +213,10 @@ export async function savePassengerJourney(journeyData) {
       trip_id: journeyData.trip_id || null,
       origin_name: journeyData.origin_name,
       origin_lat: journeyData.origin_lat || null,
-      origin_lng: journeyData.origin_lng || null,
       destination_name: journeyData.destination_name,
       destination_lat: journeyData.destination_lat || null,
       destination_lng: journeyData.destination_lng || null,
+      route_direction: journeyData.route_direction || journeyData.direction || 'Northbound',
       status: 'planned'
     };
 
@@ -363,6 +363,51 @@ export async function fetchUserJourneys(passengerId) {
   }
 }
 
+export async function fetchJourneyStatus(journeyIdOrToken) {
+  try {
+    if (!journeyIdOrToken) return { success: false, error: 'No ID or token provided' };
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(journeyIdOrToken));
+    let query = supabase.from('passenger_journeys').select('*');
+    if (isUuid) {
+      query = query.eq('id', journeyIdOrToken);
+    } else {
+      query = query.eq('qr_token', journeyIdOrToken);
+    }
+    const { data, error } = await query.maybeSingle();
+    if (error) return { success: false, error: error.message };
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+export function subscribeToPassengerJourney(journeyIdOrToken, onUpdate) {
+  if (!journeyIdOrToken) return () => {};
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(journeyIdOrToken));
+  const filter = isUuid ? `id=eq.${journeyIdOrToken}` : `qr_token=eq.${journeyIdOrToken}`;
+  const channel = supabase
+    .channel(`pax_journey_${String(journeyIdOrToken).slice(0, 12)}_${Date.now()}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'passenger_journeys',
+        filter
+      },
+      (payload) => {
+        if (payload.new) {
+          onUpdate(payload.new);
+        }
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 // ========================================================
 // LIVE TRACKING & REALTIME OCCUPANCY
 // ========================================================
@@ -386,6 +431,16 @@ export async function fetchTripOccupancy(tripId) {
   try {
     let occupancyData = null;
 
+    // 0. Check localStorage live occupancy first for zero-latency sync across local apps
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const localLive = JSON.parse(localStorage.getItem('qcbus_live_occupancy') || 'null');
+        if (localLive) {
+          occupancyData = { ...localLive };
+        }
+      } catch (_) {}
+    }
+
     // 1. Fetch from trip_occupancy view if available
     try {
       const { data, error } = await supabase
@@ -393,12 +448,12 @@ export async function fetchTripOccupancy(tripId) {
         .select('*')
         .eq('trip_id', tripId)
         .maybeSingle();
-      if (!error && data) occupancyData = data;
+      if (!error && data) occupancyData = { ...(occupancyData || {}), ...data };
     } catch (_) {}
 
     // 2. Fetch boarded passengers from passenger_journeys to calculate priority vs regular seat counts
-    let priorityBoarded = 0;
-    let regularBoarded = 0;
+    let priorityBoarded = occupancyData?.priority_boarded != null ? Number(occupancyData.priority_boarded) : 0;
+    let regularBoarded = occupancyData?.regular_boarded != null ? Number(occupancyData.regular_boarded) : 0;
     try {
       let query = supabase.from('passenger_journeys')
         .select('passenger_category,passenger_count,status')
@@ -410,14 +465,18 @@ export async function fetchTripOccupancy(tripId) {
 
       const { data: journeys } = await query;
       if (journeys && journeys.length > 0) {
+        let dbPri = 0;
+        let dbReg = 0;
         for (const j of journeys) {
           const count = Math.max(1, Number(j.passenger_count) || 1);
           if (isPriorityCategory(j.passenger_category)) {
-            priorityBoarded += count;
+            dbPri += count;
           } else {
-            regularBoarded += count;
+            dbReg += count;
           }
         }
+        priorityBoarded = Math.max(priorityBoarded, dbPri);
+        regularBoarded = Math.max(regularBoarded, dbReg);
       }
     } catch (_) {}
 

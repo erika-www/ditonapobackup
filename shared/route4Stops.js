@@ -138,3 +138,69 @@ export function resolveRoute4Stop(input) {
   if (bestScore >= 0.20) return best;
   return null;
 }
+
+/**
+ * Returns 0-based stop index along Route 4 for a given direction.
+ */
+export function getStopIndex(stopInput, direction = 'Northbound') {
+  const resolved = resolveRoute4Stop(stopInput);
+  if (!resolved) return -1;
+  const list = String(direction).toLowerCase().includes('south') ? SOUTHBOUND_ROUTE4_STOPS : ROUTE4_STOPS;
+  return list.findIndex((s) => s.id === resolved.id || s.name.toLowerCase() === resolved.name.toLowerCase());
+}
+
+/**
+ * Infers travel direction (Northbound vs Southbound) from boarding & destination stops.
+ */
+export function detectPassengerDirection(boardingStop, destinationStop) {
+  const resolvedFrom = resolveRoute4Stop(boardingStop);
+  const resolvedTo = resolveRoute4Stop(destinationStop);
+  if (!resolvedFrom || !resolvedTo) return null;
+  const fromIdx = ROUTE4_STOPS.findIndex((s) => s.id === resolvedFrom.id || s.name.toLowerCase() === resolvedFrom.name.toLowerCase());
+  const toIdx = ROUTE4_STOPS.findIndex((s) => s.id === resolvedTo.id || s.name.toLowerCase() === resolvedTo.name.toLowerCase());
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return null;
+  return fromIdx < toIdx ? 'Northbound' : 'Southbound';
+}
+
+/**
+ * Validates whether a passenger's selected direction and stops match the bus's operating direction.
+ * Returns { valid: true } or { valid: false, error: 'trip error: wrong way' }
+ */
+export function validateTripDirection(passengerDirection, boardingStop, destinationStop, busDirection = 'Northbound') {
+  const normalizedBusDir = String(busDirection || 'Northbound').trim().toLowerCase().includes('south')
+    ? 'southbound'
+    : 'northbound';
+
+  const resolvedOrigin = resolveRoute4Stop(boardingStop);
+  const resolvedDest = resolveRoute4Stop(destinationStop);
+
+  if (resolvedOrigin && resolvedDest && resolvedOrigin.id === resolvedDest.id) {
+    return { valid: false, error: 'trip error: wrong way' };
+  }
+
+  // 1. If the pass specifies explicit direction, compare directly with bus direction
+  const explicitDir = passengerDirection
+    ? (String(passengerDirection).trim().toLowerCase().includes('south')
+        ? 'southbound'
+        : (String(passengerDirection).trim().toLowerCase().includes('north') ? 'northbound' : null))
+    : null;
+
+  if (explicitDir && explicitDir !== normalizedBusDir) {
+    return { valid: false, error: 'trip error: wrong way' };
+  }
+
+  // 2. Infer direction from canonical stop sequence
+  const inferredDir = detectPassengerDirection(boardingStop, destinationStop);
+  if (inferredDir && inferredDir.toLowerCase() !== normalizedBusDir) {
+    return { valid: false, error: 'trip error: wrong way' };
+  }
+
+  // 3. Ensure destination is after origin in current bus sequence
+  const fromIdx = getStopIndex(boardingStop, normalizedBusDir === 'southbound' ? 'Southbound' : 'Northbound');
+  const toIdx = getStopIndex(destinationStop, normalizedBusDir === 'southbound' ? 'Southbound' : 'Northbound');
+  if (fromIdx !== -1 && toIdx !== -1 && fromIdx >= toIdx) {
+    return { valid: false, error: 'trip error: wrong way' };
+  }
+
+  return { valid: true };
+}

@@ -7,14 +7,14 @@
  */
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Home, MapPin, Bus, User, Clock, Users, ArrowRight,
+  Home, MapPin, Bus, User, Clock, Users, ArrowRight, ArrowUp, ArrowDown,
   Download, Navigation, CheckCircle, XCircle, AlertTriangle,
   Sliders, LogOut, Sun, Moon, Globe, Type, ShieldCheck, Mail,
   BarChart3, TrendingUp, Leaf, Award, Calendar, Sparkles, DollarSign, Activity, Trash2
 } from 'lucide-react';
 import { QC_ROUTES } from '../mockData';
-import { ROUTE4_STOPS } from '@shared/route4Stops';
-import { generateDailyTripId, createPassengerQrPayload, isPriorityCategory } from '@shared/qrPassUtils';
+import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, getStopIndex, resolveRoute4Stop } from '@shared/route4Stops';
+import { generateDailyTripId, createPassengerQrPayload, isPriorityCategory, hasPriorityInParty } from '@shared/qrPassUtils';
 import { drawQRCodeCanvas, downloadQRImage } from '../utils/qrGenerator';
 import { InteractiveMap } from './InteractiveMap';
 import { fetchGoogleMapsETA } from '../services/googleMapsService';
@@ -28,7 +28,9 @@ import {
   fetchTripOccupancy,
   subscribeToBusLocation,
   subscribeToTripOccupancy,
-  fetchConfiguredRoute4Stops
+  fetchConfiguredRoute4Stops,
+  fetchJourneyStatus,
+  subscribeToPassengerJourney
 } from '../services/supabaseClient';
 
 const TRANSLATIONS = {
@@ -186,6 +188,61 @@ export function StartTripInterface({
   const [savingTrip, setSavingTrip] = useState(false);
   const [destinationReachedModalOpen, setDestinationReachedModalOpen] = useState(false);
 
+  // Direction: 'Northbound' (QC Hall to General Luis) | 'Southbound' (General Luis to QC Hall)
+  const [direction, setDirection] = useState('Northbound');
+
+  // Companions detail list: [{ name: '', category: 'Regular' }, ...]
+  const [companionsList, setCompanionsList] = useState([]);
+
+  // Active pool of Route 4 stops based on selected direction
+  const currentStopsPool = direction === 'Southbound'
+    ? SOUTHBOUND_ROUTE4_STOPS
+    : (configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS);
+
+  const handleDirectionChange = (newDir) => {
+    setDirection(newDir);
+    const pool = newDir === 'Southbound'
+      ? SOUTHBOUND_ROUTE4_STOPS
+      : (configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS);
+    setStartStop(pool[0]);
+    setEndStop(pool[1] || pool[0]);
+  };
+
+  const handleCompanionCountChange = (newCount) => {
+    const clamped = Math.max(1, Math.min(9, Number(newCount) || 1));
+    setCompanionCount(clamped);
+    setCompanionsList((prev) => {
+      const next = [...prev];
+      while (next.length < clamped) {
+        next.push({ name: '', category: 'Regular' });
+      }
+      return next.slice(0, clamped);
+    });
+  };
+
+  const handleCompanionFieldChange = (index, field, value) => {
+    setCompanionsList((prev) => {
+      const next = [...prev];
+      if (next[index]) {
+        next[index] = { ...next[index], [field]: value };
+      }
+      return next;
+    });
+  };
+
+  // Determine whether the user's booking/party qualifies for Priority Seating visibility
+  const userPartyHasPriority = () => {
+    if (activeTrip) {
+      if (activeTrip.hasPriorityInParty != null) return Boolean(activeTrip.hasPriorityInParty);
+      if (isPriorityCategory(activeTrip.category)) return true;
+      if (Array.isArray(activeTrip.companionsList) && activeTrip.companionsList.some((c) => isPriorityCategory(c?.category))) return true;
+      return false;
+    }
+    if (isPriorityCategory(bookingCategory || currentUser?.category)) return true;
+    if (!isAlone && Array.isArray(companionsList) && companionsList.some((c) => isPriorityCategory(c?.category))) return true;
+    return false;
+  };
+
   // Realtime Live Bus Tracking & Seat Occupancy State
   const [routeBusTrip, setRouteBusTrip] = useState(null);
   const [liveBusCoords, setLiveBusCoords] = useState(null);
@@ -332,7 +389,7 @@ export function StartTripInterface({
               ? 'Completed'
               : (tItem.status === 'cancelled'
                 ? 'Cancelled'
-                : (tItem.status === 'boarded' ? t.inProgressStatus : t.plannedStatus))
+                : (tItem.status === 'boarded' ? 'Ongoing' : 'Planned'))
           }));
 
           setTripHistory(prev => {
@@ -372,7 +429,8 @@ export function StartTripInterface({
               category,
               boardingStop: activeItem.origin_name,
               destinationStop: activeItem.destination_name,
-              busPlate: activeItem.trips?.buses?.plate_number || ''
+              busPlate: activeItem.trips?.buses?.plate_number || '',
+              direction: activeItem.route_direction || 'Northbound'
             });
 
             setActiveTrip({
@@ -384,8 +442,9 @@ export function StartTripInterface({
               bus: { plateNumber: routeBusTrip?.bus?.plate_number || '' },
               companions: Math.max(0, Number(activeItem.companions || 0)),
               totalPassengers: Math.max(1, Number(activeItem.passenger_count || 1)),
-              status: activeItem.status === 'boarded' ? 'In Progress' : 'Planned',
-              isQrScanned: false,
+              status: activeItem.status === 'boarded' ? 'Ongoing' : 'Planned',
+              isQrScanned: activeItem.status === 'boarded',
+              direction: activeItem.route_direction || 'Northbound',
               qrData,
               dailyTripId: restoredTripId,
               category,
@@ -494,6 +553,95 @@ export function StartTripInterface({
     return () => clearInterval(timer);
   }, [activeTab, activeTrip, liveBusCoords?.updated_at]);
 
+  // Live Detection: When personnel scans passenger QR code, mark journey Ongoing and remove Cancel Trip button
+  useEffect(() => {
+    if (!activeTrip || activeTrip.status === 'Completed' || activeTrip.status === 'Cancelled') return;
+
+    const token = activeTrip.id || activeTrip.dailyTripId;
+    const dbId = activeTrip.dbId;
+
+    const markAsOngoing = () => {
+      setActiveTrip((prev) => {
+        if (!prev) return null;
+        if (prev.isQrScanned && prev.status === 'Ongoing') return prev;
+        return {
+          ...prev,
+          status: 'Ongoing',
+          isQrScanned: true
+        };
+      });
+      setTripHistory((rows) => rows.map((r) => {
+        if ((dbId && r.dbId === dbId) || r.id === token) {
+          return { ...r, status: 'Ongoing' };
+        }
+        return r;
+      }));
+    };
+
+    const checkLocalScanned = () => {
+      try {
+        if (token) {
+          const item = localStorage.getItem(`qcbus_scanned_${token}`);
+          if (item) {
+            const parsed = JSON.parse(item);
+            if (parsed.status === 'boarded' || parsed.status === 'Ongoing' || parsed.status === 'ongoing') {
+              markAsOngoing();
+              return true;
+            }
+          }
+        }
+        if (dbId) {
+          const item = localStorage.getItem(`qcbus_scanned_${dbId}`);
+          if (item) {
+            const parsed = JSON.parse(item);
+            if (parsed.status === 'boarded' || parsed.status === 'Ongoing' || parsed.status === 'ongoing') {
+              markAsOngoing();
+              return true;
+            }
+          }
+        }
+      } catch (_) {}
+      return false;
+    };
+
+    if (checkLocalScanned()) return;
+
+    const interval = setInterval(async () => {
+      if (checkLocalScanned()) return;
+      if (dbId || token) {
+        const res = await fetchJourneyStatus(dbId || token);
+        if (res.success && res.data) {
+          if (res.data.status === 'boarded' || res.data.status === 'ongoing') {
+            markAsOngoing();
+          } else if (res.data.status === 'completed') {
+            setActiveTrip((prev) => prev ? { ...prev, status: 'Completed', isQrScanned: true } : null);
+          }
+        }
+      }
+    }, 2000);
+
+    const unsubscribe = subscribeToPassengerJourney(dbId || token, (updatedRow) => {
+      if (updatedRow.status === 'boarded' || updatedRow.status === 'ongoing') {
+        markAsOngoing();
+      } else if (updatedRow.status === 'completed') {
+        setActiveTrip((prev) => prev ? { ...prev, status: 'Completed', isQrScanned: true } : null);
+      }
+    });
+
+    const onStorage = (e) => {
+      if (e.key === `qcbus_scanned_${token}` || (dbId && e.key === `qcbus_scanned_${dbId}`)) {
+        checkLocalScanned();
+      }
+    };
+    window.addEventListener('storage', onStorage);
+
+    return () => {
+      clearInterval(interval);
+      unsubscribe();
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [activeTrip?.id, activeTrip?.dbId, activeTrip?.isQrScanned, activeTrip?.status]);
+
   const handleRouteChange = (routeId) => {
     const selected = QC_ROUTES.find(r => r.id === routeId) || QC_ROUTES[0];
     const route = selected.code === 'R4' ? { ...selected, stops: configuredRoute4Stops } : selected;
@@ -513,9 +661,9 @@ export function StartTripInterface({
       const pos = await getAccurateCurrentPosition();
       const userLatitude = Number(pos.coords.latitude);
       const userLongitude = Number(pos.coords.longitude);
-      const nearest = findNearestStop(userLatitude, userLongitude, ROUTE4_STOPS);
+      const nearest = findNearestStop(userLatitude, userLongitude, currentStopsPool);
       if (nearest?.stop) {
-        const selectedStop = configuredRoute4Stops.find((stop) => stop.id === nearest.stop.id) || nearest.stop;
+        const selectedStop = currentStopsPool.find((stop) => stop.id === nearest.stop.id) || nearest.stop;
         setDetectedNearestStop({
           stop: selectedStop,
           formattedDistance: nearest.formattedDistance,
@@ -551,6 +699,13 @@ export function StartTripInterface({
       return;
     }
 
+    const fromIdx = getStopIndex(startStop, direction);
+    const toIdx = getStopIndex(endStop, direction);
+    if (fromIdx !== -1 && toIdx !== -1 && fromIdx >= toIdx) {
+      onShowToast(`Destination stop must be after boarding stop along the ${direction} route!`);
+      return;
+    }
+
     // Location is used for live tracking, but must not block route planning.
     setStep('companion_modal');
   };
@@ -579,6 +734,13 @@ export function StartTripInterface({
       const travelMins = googleEta?.durationMins || 15;
       const category = bookingCategory || currentUser?.category || 'Regular';
 
+      const cleanCompanionsList = isAlone ? [] : companionsList.slice(0, companionNumber).map(c => ({
+        name: (c.name || '').trim(),
+        category: c.category || 'Regular'
+      }));
+
+      const partyHasPriority = hasPriorityInParty(category, cleanCompanionsList);
+
       // Generate unique trip ID per passenger per day strictly formatted as MMDDYY-xxxxx
       const dailyTripId = generateDailyTripId();
 
@@ -590,7 +752,9 @@ export function StartTripInterface({
         category,
         boardingStop: startStop.name,
         destinationStop: endStop.name,
-        busPlate: bus.plateNumber
+        busPlate: bus.plateNumber,
+        direction,
+        companionsList: cleanCompanionsList
       });
 
       // Save journey to Supabase passenger_journeys table
@@ -606,7 +770,8 @@ export function StartTripInterface({
         registration_source: 'app',
         passenger_category: category,
         passenger_count: totalPassengerCount,
-        companions: companionNumber
+        companions: companionNumber,
+        route_direction: direction
       });
 
       if (!res.success) {
@@ -624,9 +789,12 @@ export function StartTripInterface({
         route: selectedRoute,
         bus: bus,
         companions: companionNumber,
+        companionsList: cleanCompanionsList,
+        hasPriorityInParty: partyHasPriority,
+        direction,
         totalPassengers: totalPassengerCount,
         category,
-        status: 'In Progress',
+        status: 'Planned',
         isQrScanned: false,
         qrData: qrPayloadString,
         dailyTripId,
@@ -650,8 +818,8 @@ export function StartTripInterface({
 
       if (onShowToast) onShowToast(
         res.localTest
-          ? `Local test pass #${dailyTripId} created. It is saved on this device; no database journey was created.`
-          : `Pass #${dailyTripId} issued successfully!`,
+          ? `Local test pass #${dailyTripId} created. It is saved on this device; ready to be scanned.`
+          : `Pass #${dailyTripId} issued successfully! Show QR to conductor upon boarding.`,
         'passenger-selection'
       );
     } catch (error) {
@@ -825,11 +993,19 @@ export function StartTripInterface({
 
       {activeTrip && (
             <div className="glass-card" style={{ borderLeft: '4px solid var(--secondary)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                <span className="badge badge-success">
-                  <span className="pulse-dot" style={{ backgroundColor: '#fff' }}></span> {t.activeJourney} ({activeTrip.id})
-                </span>
-                {activeTrip.localTest && <span className="badge" style={{ background: '#fff7ed', color: '#9a3412' }}>LOCAL TEST · NOT SYNCED</span>}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <span className={`badge ${activeTrip.isQrScanned || activeTrip.status === 'Ongoing' ? 'badge-success' : 'badge-info'}`}>
+                    <span className="pulse-dot" style={{ backgroundColor: '#fff' }}></span>
+                    {activeTrip.isQrScanned || activeTrip.status === 'Ongoing' ? 'Ongoing Journey' : 'Planned Pass'} ({activeTrip.id})
+                  </span>
+                  {activeTrip.direction && (
+                    <span className="badge" style={{ background: '#f1f5f9', color: '#0284c7', fontWeight: 700 }}>
+                      {activeTrip.direction}
+                    </span>
+                  )}
+                  {activeTrip.localTest && <span className="badge" style={{ background: '#fff7ed', color: '#9a3412' }}>LOCAL TEST · NOT SYNCED</span>}
+                </div>
                 <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                   Started at {activeTrip.startTime}
                 </span>
@@ -929,6 +1105,16 @@ export function StartTripInterface({
                       <div style={{ color: '#334155' }}>
                         To: {activeTrip.toStop?.name || activeTrip.toStop}
                       </div>
+                      {activeTrip.direction && (
+                        <div style={{ color: '#334155', fontWeight: 600 }}>
+                          Direction: {activeTrip.direction}
+                        </div>
+                      )}
+                      {Array.isArray(activeTrip.companionsList) && activeTrip.companionsList.length > 0 && (
+                        <div style={{ fontSize: '0.82rem', color: '#475569', marginTop: '0.3rem', borderTop: '1px dashed #cbd5e1', paddingTop: '0.3rem' }}>
+                          <strong>Companions:</strong> {activeTrip.companionsList.map(c => `${c.name || 'Companion'} (${c.category})`).join(', ')}
+                        </div>
+                      )}
                       <div style={{ fontWeight: 700, color: '#16a34a', marginTop: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                         ✓ {activeTrip.companions > 0 ? `1 + ${activeTrip.companions} companion(s)` : 'Solo Passenger'} · Valid Single Entry
                       </div>
@@ -938,7 +1124,9 @@ export function StartTripInterface({
                       Passengers on this pass: {activeTrip.totalPassengers || (Number(activeTrip.companions || 0) + 1)}
                     </div>
                     <div style={{ fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
-                      Show this pass to the bus conductor upon boarding
+                      {activeTrip.isQrScanned || activeTrip.status === 'Ongoing'
+                        ? '✓ Pass verified and scanned by bus conductor. Journey is ongoing!'
+                        : 'Show this pass to the bus conductor upon boarding'}
                     </div>
                   </div>
                 </div>
@@ -954,9 +1142,12 @@ export function StartTripInterface({
                 >
                   <MapPin size={14} /> Test Reached Stop Popup
                 </button>
-                <button type="button" onClick={handleCancelJourney} className="btn-danger" style={{ fontSize: '0.85rem' }}>
-                  Cancel Trip
-                </button>
+                {/* Cancel Trip button is ONLY displayed before QR code is scanned / while journey is NOT ongoing */}
+                {!activeTrip.isQrScanned && activeTrip.status !== 'Ongoing' && activeTrip.status !== 'boarded' && (
+                  <button type="button" onClick={handleCancelJourney} className="btn-danger" style={{ fontSize: '0.85rem' }}>
+                    Cancel Trip
+                  </button>
+                )}
                 <button type="button" onClick={handleCompleteJourney} className="btn-primary" style={{ fontSize: '0.85rem' }}>
                   Complete Journey
                 </button>
@@ -1013,6 +1204,62 @@ export function StartTripInterface({
                     </select>
                   </div>
 
+                  {/* Travel Direction Selector (Northbound vs Southbound) */}
+                  <div className="form-group">
+                    <label className="form-label" style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <Navigation size={16} color="var(--primary)" /> Select Travel Direction
+                    </label>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
+                      <button
+                        type="button"
+                        onClick={() => handleDirectionChange('Northbound')}
+                        className={`btn ${direction === 'Northbound' ? 'btn-primary' : 'btn-secondary'}`}
+                        style={{
+                          padding: '0.75rem 1rem',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'flex-start',
+                          textAlign: 'left',
+                          gap: '0.25rem',
+                          border: direction === 'Northbound' ? '2px solid var(--primary)' : '1px solid var(--border-color)',
+                          backgroundColor: direction === 'Northbound' ? 'var(--primary)' : 'var(--bg-subtle)',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        <strong style={{ fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          <ArrowUp size={16} /> Northbound
+                        </strong>
+                        <span style={{ fontSize: '0.78rem', opacity: 0.9 }}>
+                          QC Hall → General Luis
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDirectionChange('Southbound')}
+                        className={`btn ${direction === 'Southbound' ? 'btn-primary' : 'btn-secondary'}`}
+                        style={{
+                          padding: '0.75rem 1rem',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'flex-start',
+                          textAlign: 'left',
+                          gap: '0.25rem',
+                          border: direction === 'Southbound' ? '2px solid var(--primary)' : '1px solid var(--border-color)',
+                          backgroundColor: direction === 'Southbound' ? 'var(--primary)' : 'var(--bg-subtle)',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        <strong style={{ fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          <ArrowDown size={16} /> Southbound
+                        </strong>
+                        <span style={{ fontSize: '0.78rem', opacity: 0.9 }}>
+                          General Luis → QC Hall
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
                   {detectedNearestStop && (
                     <div style={{
                       border: '1px solid var(--primary)',
@@ -1055,7 +1302,7 @@ export function StartTripInterface({
 
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
                     <div className="form-group">
-                      <label className="form-label">{t.boardingStop}</label>
+                      <label className="form-label">{t.boardingStop} ({direction})</label>
                       <select
                         className="form-select"
                         value={isDetectingLocation ? 'detect' : startStop.id}
@@ -1064,8 +1311,7 @@ export function StartTripInterface({
                           if (e.target.value === 'detect') {
                             handleDetectNearestStop();
                           } else {
-                            const stopsPool = configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS;
-                            const s = stopsPool.find(st => st.id === e.target.value);
+                            const s = currentStopsPool.find(st => st.id === e.target.value);
                             if (s) setStartStop(s);
                           }
                         }}
@@ -1073,7 +1319,7 @@ export function StartTripInterface({
                         <option value="detect" disabled={isDetectingLocation}>
                           {isDetectingLocation ? '⏳ Detecting Nearest Stop...' : '📍 Detect Nearest Stop'}
                         </option>
-                        {(configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS).map((stop, idx) => (
+                        {currentStopsPool.map((stop, idx) => (
                           <option key={stop.id} value={stop.id}>
                             Stop {stop.stopNumber || idx + 1}: {stop.name}
                           </option>
@@ -1082,18 +1328,17 @@ export function StartTripInterface({
                     </div>
 
                     <div className="form-group">
-                      <label className="form-label">{t.destinationStop}</label>
+                      <label className="form-label">{t.destinationStop} ({direction})</label>
                       <select
                         className="form-select"
                         value={endStop.id}
                         disabled={!!activeTrip}
                         onChange={(e) => {
-                          const stopsPool = configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS;
-                          const s = stopsPool.find(st => st.id === e.target.value);
+                          const s = currentStopsPool.find(st => st.id === e.target.value);
                           if (s) setEndStop(s);
                         }}
                       >
-                        {(configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS).map((stop, idx) => (
+                        {currentStopsPool.map((stop, idx) => (
                           <option key={stop.id} value={stop.id}>
                             Stop {stop.stopNumber || idx + 1}: {stop.name}
                           </option>
@@ -1150,48 +1395,148 @@ export function StartTripInterface({
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', maxWidth: '400px', margin: '1rem auto' }}>
                   <button
                     type="button"
-                    onClick={() => { setIsAlone(true); setCompanionCount(0); }}
+                    onClick={() => { setIsAlone(true); setCompanionCount(0); setCompanionsList([]); }}
                     className={`btn ${isAlone ? 'btn-primary' : 'btn-secondary'}`}
                   >
                     {t.soloPassenger}
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setIsAlone(false); if (companionCount === 0) setCompanionCount(1); }}
+                    onClick={() => {
+                      setIsAlone(false);
+                      if (companionCount === 0) handleCompanionCountChange(1);
+                    }}
                     className={`btn ${!isAlone ? 'btn-primary' : 'btn-secondary'}`}
                   >
                     {t.withCompanions}
                   </button>
                 </div>
 
-                {!isAlone && (
-                  <div className="form-group" style={{ maxWidth: '300px', margin: '0 auto 1.25rem auto' }}>
-                    <label className="form-label">Companions (How many are with you)</label>
-                    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem' }}>
-                      <button type="button" aria-label="Remove one companion" className="btn-secondary" disabled={companionCount <= 1} onClick={() => setCompanionCount(count => Math.max(1, count - 1))}>−</button>
-                      <output aria-live="polite" style={{ minWidth: '2rem', fontWeight: 800, fontSize: '1.2rem' }}>{companionCount}</output>
-                      <button type="button" aria-label="Add one companion" className="btn-secondary" onClick={() => setCompanionCount(count => Math.min(9, count + 1))}>+</button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Passenger Category Selector matching user details */}
-                <div className="form-group" style={{ maxWidth: '360px', margin: '0.75rem auto 1.5rem auto', textAlign: 'left' }}>
-                  <label className="form-label" style={{ fontWeight: 600 }}>Passenger Category</label>
+                {/* Primary Passenger Category */}
+                <div className="form-group" style={{ maxWidth: '460px', margin: '1rem auto', textAlign: 'left' }}>
+                  <label className="form-label" style={{ fontWeight: 700 }}>
+                    Primary Passenger Category
+                  </label>
                   <select
                     className="form-select"
                     value={bookingCategory}
                     onChange={(e) => setBookingCategory(e.target.value)}
                   >
-                    <option value="Regular">Regular</option>
-                    <option value="Senior Citizen">Senior Citizen</option>
-                    <option value="Person with Disability (PWD)">Person with Disability (PWD)</option>
-                    <option value="Student">Student</option>
-                    <option value="Pregnant">Pregnant</option>
+                    <option value="Regular">Regular (Standard)</option>
+                    <option value="Senior Citizen">Senior Citizen (Priority Seat)</option>
+                    <option value="Person with Disability (PWD)">Person with Disability (PWD) (Priority Seat)</option>
+                    <option value="Student">Student (Non-Priority)</option>
+                    <option value="Pregnant">Pregnant (Priority Seat)</option>
                   </select>
                 </div>
 
-                <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
+                {!isAlone && (
+                  <div style={{ maxWidth: '500px', margin: '0 auto 1.5rem auto', textAlign: 'left' }}>
+                    <div className="form-group" style={{ textAlign: 'center', marginBottom: '1.25rem' }}>
+                      <label className="form-label" style={{ fontWeight: 700 }}>Number of Companions Traveling with You</label>
+                      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem' }}>
+                        <button
+                          type="button"
+                          aria-label="Remove one companion"
+                          className="btn-secondary"
+                          disabled={companionCount <= 1}
+                          onClick={() => handleCompanionCountChange(companionCount - 1)}
+                        >
+                          −
+                        </button>
+                        <output aria-live="polite" style={{ minWidth: '2.5rem', fontWeight: 800, fontSize: '1.25rem', textAlign: 'center' }}>
+                          {companionCount}
+                        </output>
+                        <button
+                          type="button"
+                          aria-label="Add one companion"
+                          className="btn-secondary"
+                          disabled={companionCount >= 9}
+                          onClick={() => handleCompanionCountChange(companionCount + 1)}
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Companion Details (Optional Name & Category for Each Companion) */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+                      {companionsList.slice(0, companionCount).map((companion, idx) => (
+                        <div
+                          key={idx}
+                          style={{
+                            backgroundColor: 'var(--bg-subtle)',
+                            padding: '0.9rem 1rem',
+                            borderRadius: '8px',
+                            border: '1px solid var(--border-color)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '0.5rem'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <strong style={{ fontSize: '0.88rem', color: 'var(--primary)' }}>
+                              Companion #{idx + 1}
+                            </strong>
+                            <span style={{ fontSize: '0.75rem', color: isPriorityCategory(companion.category) ? '#b45309' : 'var(--text-muted)', fontWeight: 600 }}>
+                              {isPriorityCategory(companion.category) ? '★ Priority Seating Eligible' : 'Standard Seating'}
+                            </span>
+                          </div>
+
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.6rem' }}>
+                            <div>
+                              <input
+                                type="text"
+                                placeholder="Name (optional)"
+                                value={companion.name || ''}
+                                onChange={(e) => handleCompanionFieldChange(idx, 'name', e.target.value)}
+                                className="form-select"
+                                style={{ fontSize: '0.88rem' }}
+                              />
+                            </div>
+                            <div>
+                              <select
+                                value={companion.category || 'Regular'}
+                                onChange={(e) => handleCompanionFieldChange(idx, 'category', e.target.value)}
+                                className="form-select"
+                                style={{ fontSize: '0.88rem' }}
+                              >
+                                <option value="Regular">Regular</option>
+                                <option value="Senior Citizen">Senior Citizen (Priority)</option>
+                                <option value="Person with Disability (PWD)">PWD (Priority)</option>
+                                <option value="Student">Student</option>
+                                <option value="Pregnant">Pregnant (Priority)</option>
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Seating Availability Hint banner */}
+                    <div style={{
+                      marginTop: '1rem',
+                      padding: '0.75rem 1rem',
+                      borderRadius: '8px',
+                      backgroundColor: userPartyHasPriority() ? 'rgba(245, 158, 11, 0.12)' : 'rgba(139, 92, 246, 0.12)',
+                      border: userPartyHasPriority() ? '1px solid #f59e0b' : '1px solid #8b5cf6',
+                      fontSize: '0.82rem',
+                      lineHeight: '1.4'
+                    }}>
+                      {userPartyHasPriority() ? (
+                        <span style={{ color: '#b45309', fontWeight: 600 }}>
+                          ★ Priority category member in party: Both Priority (20 seats) and Non-Priority (30 seats) seating will be available.
+                        </span>
+                      ) : (
+                        <span style={{ color: '#6d28d9', fontWeight: 600 }}>
+                          ℹ All companions and passenger are in non-priority category: Only non-priority seating (30 seats) will be shown.
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', marginTop: '1rem' }}>
                   <button type="button" onClick={() => setStep('form')} className="btn-secondary">Back</button>
                   <button type="button" onClick={handleCompanionConfirm} disabled={savingTrip} className="btn-primary">
                     {savingTrip ? 'Saving trip…' : <>{t.confirmAndSummary} →</>}
@@ -1529,22 +1874,32 @@ export function StartTripInterface({
                 <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Currently travelling</span>
               </div>
 
-              <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1rem', borderRadius: '8px', border: '1px solid #f59e0b' }}>
-                <span style={{ fontSize: '0.75rem', color: '#f59e0b', fontWeight: 700, display: 'block', marginBottom: '.25rem' }}>PRIORITY SEATS</span>
-                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#f59e0b' }}>
-                  {`${availablePrioritySeats} / 20`}
+              {/* PRIORITY SEATS - shown ONLY if user or any companion has a priority category */}
+              {userPartyHasPriority() && (
+                <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1rem', borderRadius: '8px', border: '1px solid #f59e0b' }}>
+                  <span style={{ fontSize: '0.75rem', color: '#f59e0b', fontWeight: 700, display: 'block', marginBottom: '.25rem' }}>PRIORITY SEATS</span>
+                  <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#f59e0b' }}>
+                    {`${availablePrioritySeats} / 20`}
+                  </div>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Senior, PWD, Pregnant</span>
                 </div>
-                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Senior, PWD, Pregnant</span>
-              </div>
+              )}
 
+              {/* NON-PRIORITY SEATS */}
               <div style={{ backgroundColor: 'var(--bg-subtle)', padding: '1rem', borderRadius: '8px', border: '1px solid #8b5cf6' }}>
-                <span style={{ fontSize: '0.75rem', color: '#8b5cf6', fontWeight: 700, display: 'block', marginBottom: '.25rem' }}>REGULAR SEATS</span>
+                <span style={{ fontSize: '0.75rem', color: '#8b5cf6', fontWeight: 700, display: 'block', marginBottom: '.25rem' }}>NON-PRIORITY SEATS</span>
                 <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#8b5cf6' }}>
                   {`${availableRegularSeats} / 30`}
                 </div>
                 <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Standard commuter seating</span>
               </div>
             </div>
+
+            {!userPartyHasPriority() && (
+              <div style={{ marginTop: '0.75rem', padding: '0.6rem 0.85rem', backgroundColor: 'var(--bg-subtle)', borderRadius: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)', border: '1px dashed var(--border-color)' }}>
+                ℹ Non-priority group: Showing only non-priority seats ({availableRegularSeats} / 30). Priority seats (20 seats) are shown when at least one priority passenger (Senior, PWD, Pregnant) is registered.
+              </div>
+            )}
           </div>
         </div>
       )}
