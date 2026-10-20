@@ -9,7 +9,7 @@ import {
   fetchJourneyByQrToken
 } from '../services/supabaseClient';
 import { ROUTE4_STOPS } from '@shared/route4Stops';
-import { parsePassengerQRCode, isPriorityCategory } from '@shared/qrPassUtils';
+import { isPriorityCategory } from '@shared/qrPassUtils';
 
 const timeLabel = (value) => (value
   ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -26,7 +26,8 @@ export function PassengerCheckInPage() {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [showStopBreakdown, setShowStopBreakdown] = useState(false);
-  const scannerRef = useRef(null);
+  const scannerBufferRef = useRef('');
+  const scannerResetTimerRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,6 +103,7 @@ export function PassengerCheckInPage() {
 
     const isPri = isPriorityCategory(journey.passenger_category || journey.profiles?.passenger_category || journey.category);
     const catName = journey.passenger_category || journey.profiles?.passenger_category || journey.category || 'Regular';
+    const passengerCount = Math.max(1, Number(journey.count || journey.passenger_count) || 1);
 
     const result = await recordBoardingEvent({
       tripId: effectiveTripId,
@@ -116,13 +118,13 @@ export function PassengerCheckInPage() {
       setError(result.error);
     } else {
       if (eventType === 'board') {
-        const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - 1) : availablePrioritySeats;
-        const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - 1) : availableRegularSeats;
+        const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - passengerCount) : availablePrioritySeats;
+        const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - passengerCount) : availableRegularSeats;
         setNotice(
-          `✓ PASSENGER BOARDED (${catName}). Decremented ${isPri ? `Priority Seats (now ${remainingPriority}/20)` : `Regular Seats (now ${remainingRegular}/30)`}. Boarded at: ${journey.origin_name || 'Stop 1'} | Alights at: ${journey.destination_name || 'End Stop'}.`
+          `✓ ${passengerCount} PASSENGER${passengerCount === 1 ? '' : 'S'} BOARDED (${catName}). Decremented ${isPri ? `Priority Seats (now ${remainingPriority}/20)` : `Regular Seats (now ${remainingRegular}/30)`}. Boarded at: ${journey.origin_name || 'Stop 1'} | Alights at: ${journey.destination_name || 'End Stop'}.`
         );
       } else {
-        setNotice(`✓ PASSENGER ALIGHTED at ${journey.destination_name || 'Destination'}. Seat freed.`);
+        setNotice(`✓ ${passengerCount} PASSENGER${passengerCount === 1 ? '' : 'S'} ALIGHTED at ${journey.destination_name || 'Destination'}. ${passengerCount} seat${passengerCount === 1 ? '' : 's'} freed.`);
       }
     }
 
@@ -136,13 +138,11 @@ export function PassengerCheckInPage() {
     setError('');
     setNotice('');
 
-    const parsed = parsePassengerQRCode(raw);
-    const token = parsed?.tripId || raw.match(/(?:Code|Journey ID|Pass ID):\s*([^\r\n]+)/i)?.[1]?.trim() || raw;
-
-    const found = await fetchJourneyByQrToken(token || raw);
+    // Keep the complete payload all the way through lookup. Passing only the
+    // token here used to discard the encoded stops, category and party size.
+    const found = await fetchJourneyByQrToken(raw);
     if (!found.success || !found.data) {
       setError(found.error || 'QR pass was not recognized or found in registry.');
-      scannerRef.current?.focus();
       return;
     }
 
@@ -153,7 +153,6 @@ export function PassengerCheckInPage() {
 
     const nextEventType = journey.status === 'boarded' ? 'alight' : 'board';
     await recordEvent(journey, nextEventType);
-    scannerRef.current?.focus();
   };
 
   const handleScanFormSubmit = async (event) => {
@@ -162,6 +161,48 @@ export function PassengerCheckInPage() {
     event.currentTarget.reset();
     await processScannedCode(raw);
   };
+
+  // USB/TTL scanners act like a very fast keyboard and normally finish with
+  // Enter. Capture that stream at window level so a focused text field is not
+  // required (and mobile devices therefore never open their soft keyboard).
+  useEffect(() => {
+    const resetBufferSoon = () => {
+      window.clearTimeout(scannerResetTimerRef.current);
+      scannerResetTimerRef.current = window.setTimeout(() => {
+        scannerBufferRef.current = '';
+      }, 500);
+    };
+
+    const onScannerKeyDown = (event) => {
+      const target = event.target;
+      const isEditable = target instanceof HTMLElement && (
+        target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
+      );
+      if (isEditable || event.ctrlKey || event.metaKey || event.altKey) return;
+
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        const scannedValue = scannerBufferRef.current.trim();
+        scannerBufferRef.current = '';
+        window.clearTimeout(scannerResetTimerRef.current);
+        if (scannedValue) {
+          event.preventDefault();
+          processScannedCode(scannedValue);
+        }
+        return;
+      }
+
+      if (event.key.length === 1) {
+        scannerBufferRef.current += event.key;
+        resetBufferSoon();
+      }
+    };
+
+    window.addEventListener('keydown', onScannerKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onScannerKeyDown);
+      window.clearTimeout(scannerResetTimerRef.current);
+    };
+  });
 
   const dailyCounts = {};
   const dailyIds = registry.map((journey) => {
@@ -184,13 +225,13 @@ export function PassengerCheckInPage() {
           <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'wrap' }}>
             <form onSubmit={handleScanFormSubmit} style={{ display: 'flex', gap: '.4rem' }}>
               <input
-                ref={scannerRef}
                 name="qr"
                 className="form-input"
-                autoFocus
                 autoComplete="off"
+                inputMode="none"
                 placeholder="USB scanner ready"
                 aria-label="USB QR barcode scanner input"
+                title="Scanner capture is active; tap only to enter a code manually"
                 style={{ width: '14rem', padding: '.45rem .6rem' }}
               />
             </form>

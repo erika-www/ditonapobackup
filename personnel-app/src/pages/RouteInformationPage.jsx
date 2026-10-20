@@ -112,7 +112,8 @@ export function RouteInformationPage() {
   const [manualRegistrationBusy, setManualRegistrationBusy] = useState(false);
   const manualSubmissionRef = useRef(false);
 
-  const scannerInputRef = useRef(null);
+  const scannerBufferRef = useRef('');
+  const scannerResetTimerRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -410,7 +411,9 @@ export function RouteInformationPage() {
     const token = parsed?.tripId || raw.match(/(?:Code|Journey ID|Pass ID):\s*([^\r\n]+)/i)?.[1]?.trim() || raw;
 
     const effectiveTripId = operationalTripId || dutySession?.tripId || 'operational-trip';
-    const found = await fetchJourneyByQrToken(token || raw);
+    // Preserve the entire QR payload so its encoded boarding stop,
+    // destination, category and passenger count reach the lookup layer.
+    const found = await fetchJourneyByQrToken(raw);
 
     if (!found.success || !found.data) {
       setStatusMessage(`Hardware scan alert: ${found.error || 'Pass not recognized.'}`);
@@ -422,9 +425,9 @@ export function RouteInformationPage() {
     const nextEventType = journey.status === 'boarded' ? 'alight' : 'board';
     const isPri = isPriorityCategory(journey.passenger_category || journey.profiles?.passenger_category || journey.category);
     const cat = journey.passenger_category || journey.profiles?.passenger_category || journey.category || 'Regular';
+    const count = Math.max(1, Number(journey.count || parsed?.count) || 1);
 
     if (isTestMode) {
-      const count = Math.max(1, Number(journey.count || parsed?.count) || 1);
       const capacity = busCapacity;
       if (nextEventType === 'board' && totalOnboard + count > capacity) {
         setStatusMessage(`Boarding rejected: ${count} passengers requested, but only ${Math.max(0, capacity - totalOnboard)} seats are available.`);
@@ -471,13 +474,13 @@ export function RouteInformationPage() {
       setStatusMessage(`Scan recorded with notice: ${result.error}`);
     } else {
       if (nextEventType === 'board') {
-        const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - 1) : availablePrioritySeats;
-        const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - 1) : availableRegularSeats;
+        const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - count) : availablePrioritySeats;
+        const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - count) : availableRegularSeats;
         setStatusMessage(
-          `✓ PASSENGER BOARDED (${cat}). Decremented ${isPri ? `Priority Seats (${remainingPriority}/${prioritySeatCapacity})` : `Regular Seats (${remainingRegular}/${regularSeatCapacity})`}. Boarding: ${journey.origin_name || currentStop.name} → Alights: ${journey.destination_name || 'Destination'}.`
+          `✓ ${count} PASSENGER${count === 1 ? '' : 'S'} BOARDED (${cat}). Decremented ${isPri ? `Priority Seats (${remainingPriority}/${prioritySeatCapacity})` : `Regular Seats (${remainingRegular}/${regularSeatCapacity})`}. Boarding: ${journey.origin_name || currentStop.name} → Alights: ${journey.destination_name || 'Destination'}.`
         );
       } else {
-        setStatusMessage(`✓ PASSENGER ALIGHTED at ${journey.destination_name || currentStop.name}. Seat restored.`);
+        setStatusMessage(`✓ ${count} PASSENGER${count === 1 ? '' : 'S'} ALIGHTED at ${journey.destination_name || currentStop.name}. ${count} seat${count === 1 ? '' : 's'} restored.`);
       }
     }
 
@@ -487,6 +490,43 @@ export function RouteInformationPage() {
       if (reg.success) setPassengerRegistry(reg.data);
     }
   };
+
+  // Capture keyboard-wedge scanners without focusing an input. This keeps the
+  // on-screen keyboard closed on phones/tablets while scans continue to work.
+  useEffect(() => {
+    const onScannerKeyDown = (event) => {
+      const target = event.target;
+      const isEditable = target instanceof HTMLElement && (
+        target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
+      );
+      if (isEditable || event.ctrlKey || event.metaKey || event.altKey) return;
+
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        const scannedValue = scannerBufferRef.current.trim();
+        scannerBufferRef.current = '';
+        window.clearTimeout(scannerResetTimerRef.current);
+        if (scannedValue) {
+          event.preventDefault();
+          handleQrScan(scannedValue);
+        }
+        return;
+      }
+
+      if (event.key.length === 1) {
+        scannerBufferRef.current += event.key;
+        window.clearTimeout(scannerResetTimerRef.current);
+        scannerResetTimerRef.current = window.setTimeout(() => {
+          scannerBufferRef.current = '';
+        }, 500);
+      }
+    };
+
+    window.addEventListener('keydown', onScannerKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onScannerKeyDown);
+      window.clearTimeout(scannerResetTimerRef.current);
+    };
+  });
 
   // Start / Restart Another Trip Handler
   const handleStartAnotherTrip = async (forceNewTrip = false) => {
@@ -705,8 +745,8 @@ export function RouteInformationPage() {
                 </button>
               </div>
 
-              <form onSubmit={async (event) => { event.preventDefault(); const raw = event.currentTarget.elements.qr.value; event.currentTarget.reset(); await handleQrScan(raw); scannerInputRef.current?.focus(); }} style={{ display: 'flex', gap: '.35rem' }}>
-                <input ref={scannerInputRef} name="qr" className="form-input" autoFocus autoComplete="off" placeholder="USB scanner ready" aria-label="USB QR barcode scanner input" style={{ width: '14rem', padding: '.35rem .55rem', fontSize: '.75rem' }} />
+              <form onSubmit={async (event) => { event.preventDefault(); const raw = event.currentTarget.elements.qr.value; event.currentTarget.reset(); await handleQrScan(raw); }} style={{ display: 'flex', gap: '.35rem' }}>
+                <input name="qr" className="form-input" autoComplete="off" inputMode="none" placeholder="USB scanner ready" aria-label="USB QR barcode scanner input" title="Scanner capture is active; tap only to enter a code manually" style={{ width: '14rem', padding: '.35rem .55rem', fontSize: '.75rem' }} />
               </form>
             </div>
           </div>

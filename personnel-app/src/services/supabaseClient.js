@@ -728,32 +728,37 @@ export async function fetchJourneyByQrToken(token) {
   try {
     const parsed = parsePassengerQRCode(token);
     const searchToken = parsed?.tripId || token;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(searchToken);
 
-    // First attempt: search by qr_token or id
-    let { data, error } = await supabase.from('passenger_journeys')
-      .select('id,trip_id,passenger_id,status,passenger_name,passenger_category,passenger_count,companions,origin_name,destination_name,created_at,profiles:profiles(full_name,passenger_category)')
-      .or(`qr_token.eq."${searchToken}",id.eq."${searchToken}",qr_token.eq."${token}"`)
-      .maybeSingle();
+    // Never put the raw JSON payload into a PostgREST .or() expression: its
+    // commas and quotes corrupt the filter. Also avoid comparing a daily pass
+    // code with the UUID id column, which makes Postgres reject the query.
+    const journeyQuery = supabase.from('passenger_journeys')
+      .select('id,qr_token,trip_id,passenger_id,status,passenger_name,passenger_category,passenger_count,companions,origin_name,destination_name,created_at,profiles:profiles(full_name,passenger_category)');
+    let { data, error } = isUuid
+      ? await journeyQuery.or(`qr_token.eq."${searchToken}",id.eq."${searchToken}"`).maybeSingle()
+      : await journeyQuery.eq('qr_token', searchToken).maybeSingle();
+    if (error) throw error;
 
     if (!data && parsed?.tripId) {
       // Check if maybe stored with raw string
       const rawTry = await supabase.from('passenger_journeys')
-        .select('id,trip_id,passenger_id,status,passenger_name,passenger_category,passenger_count,companions,origin_name,destination_name,created_at,profiles:profiles(full_name,passenger_category)')
+        .select('id,qr_token,trip_id,passenger_id,status,passenger_name,passenger_category,passenger_count,companions,origin_name,destination_name,created_at,profiles:profiles(full_name,passenger_category)')
         .eq('qr_token', parsed.tripId).maybeSingle();
       if (rawTry.data) data = rawTry.data;
     }
 
     if (data) {
-      const cat = data.profiles?.passenger_category || parsed?.category || 'Regular';
+      const cat = data.passenger_category || parsed?.category || data.profiles?.passenger_category || 'Regular';
       return {
         success: true,
         data: {
           ...data,
           passenger_category: cat,
           is_priority: isPriorityCategory(cat),
-          origin_name: data.origin_name || parsed?.boardingStop || '',
-          destination_name: data.destination_name || parsed?.destinationStop || '',
-          count: Math.max(1, Number(data.passenger_count || parsed?.count) || 1),
+          origin_name: parsed?.boardingStop || data.origin_name || '',
+          destination_name: parsed?.destinationStop || data.destination_name || '',
+          count: Math.max(1, Number(parsed?.count || data.passenger_count) || 1),
           parsed
         }
       };
