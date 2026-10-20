@@ -96,10 +96,21 @@ export function PassengerCheckInPage() {
   };
 
   const recordEvent = async (journey, eventType) => {
-    const effectiveTripId = tripId || dutySession?.tripId || 'operational-trip';
     setBusyId(journey.id);
     setError('');
     setNotice('');
+
+    let effectiveTripId = tripId || dutySession?.tripId || null;
+    if (!effectiveTripId && dutySession?.plateNumber) {
+      const activeTrip = await fetchOngoingTripForBus(dutySession.plateNumber);
+      effectiveTripId = activeTrip.success ? activeTrip.data?.id : null;
+      if (effectiveTripId) setTripId(effectiveTripId);
+    }
+    if (!effectiveTripId) {
+      setError('No active trip is available. Start the assigned bus trip before scanning passengers.');
+      setBusyId(null);
+      return;
+    }
 
     const isPri = isPriorityCategory(journey.passenger_category || journey.profiles?.passenger_category || journey.category);
     const catName = journey.passenger_category || journey.profiles?.passenger_category || journey.category || 'Regular';
@@ -117,6 +128,23 @@ export function PassengerCheckInPage() {
     if (!result.success) {
       setError(result.error);
     } else {
+      const updatedJourney = {
+        ...journey,
+        trip_id: effectiveTripId,
+        count: passengerCount,
+        status: eventType === 'board' ? 'boarded' : 'completed',
+        boarded_at: eventType === 'board' ? (journey.boarded_at || new Date().toISOString()) : journey.boarded_at,
+        alighted_at: eventType === 'alight' ? (journey.alighted_at || new Date().toISOString()) : journey.alighted_at
+      };
+      // Trigger all derived counters immediately instead of waiting for the
+      // next polling cycle to return the changed journey status.
+      setRegistry((rows) => {
+        const exists = rows.some((row) => row.id === updatedJourney.id);
+        return exists
+          ? rows.map((row) => row.id === updatedJourney.id ? { ...row, ...updatedJourney } : row)
+          : [...rows, updatedJourney];
+      });
+
       if (eventType === 'board') {
         const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - passengerCount) : availablePrioritySeats;
         const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - passengerCount) : availableRegularSeats;

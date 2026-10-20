@@ -410,7 +410,7 @@ export function RouteInformationPage() {
     const parsed = parsePassengerQRCode(raw);
     const token = parsed?.tripId || raw.match(/(?:Code|Journey ID|Pass ID):\s*([^\r\n]+)/i)?.[1]?.trim() || raw;
 
-    const effectiveTripId = operationalTripId || dutySession?.tripId || 'operational-trip';
+    let effectiveTripId = operationalTripId || dutySession?.tripId || null;
     // Preserve the entire QR payload so its encoded boarding stop,
     // destination, category and passenger count reach the lookup layer.
     const found = await fetchJourneyByQrToken(raw);
@@ -461,6 +461,15 @@ export function RouteInformationPage() {
       return;
     }
 
+    if (!effectiveTripId) {
+      try {
+        effectiveTripId = await ensureOperationalTrip();
+      } catch (error) {
+        setStatusMessage(`Passenger count was not changed: ${error.message}`);
+        return;
+      }
+    }
+
     const result = await recordBoardingEvent({
       tripId: effectiveTripId,
       eventType: nextEventType,
@@ -473,6 +482,26 @@ export function RouteInformationPage() {
     if (!result.success) {
       setStatusMessage(`Scan recorded with notice: ${result.error}`);
     } else {
+      const updatedJourney = {
+        ...journey,
+        trip_id: effectiveTripId,
+        qr_token: journey.qr_token || token,
+        count,
+        origin_name: parsed?.boardingStop || journey.origin_name || currentStop.name,
+        destination_name: parsed?.destinationStop || journey.destination_name || 'Destination',
+        status: nextEventType === 'board' ? 'boarded' : 'completed',
+        boarded_at: nextEventType === 'board' ? (journey.boarded_at || new Date().toISOString()) : journey.boarded_at,
+        alighted_at: nextEventType === 'alight' ? (journey.alighted_at || new Date().toISOString()) : journey.alighted_at
+      };
+      // Update the journey immediately so boarded-at-stop, alighting-at-stop,
+      // and onboard totals all react to this scan without waiting for polling.
+      setPassengerRegistry((rows) => {
+        const exists = rows.some((row) => row.id === updatedJourney.id || row.qr_token === token);
+        return exists
+          ? rows.map((row) => row.id === updatedJourney.id || row.qr_token === token ? { ...row, ...updatedJourney } : row)
+          : [...rows, updatedJourney];
+      });
+
       if (nextEventType === 'board') {
         const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - count) : availablePrioritySeats;
         const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - count) : availableRegularSeats;
@@ -485,8 +514,8 @@ export function RouteInformationPage() {
     }
 
     // Refresh passenger registry
-    if (operationalTripId) {
-      const reg = await fetchPassengerRegistry(operationalTripId);
+    if (effectiveTripId) {
+      const reg = await fetchPassengerRegistry(effectiveTripId);
       if (reg.success) setPassengerRegistry(reg.data);
     }
   };
