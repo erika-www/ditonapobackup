@@ -183,13 +183,6 @@ export function PassengerCheckInPage() {
     await recordEvent(journey, nextEventType);
   };
 
-  const handleScanFormSubmit = async (event) => {
-    event.preventDefault();
-    const raw = event.currentTarget.elements.qr.value.trim();
-    event.currentTarget.reset();
-    await processScannedCode(raw);
-  };
-
   // USB/TTL scanners act like a very fast keyboard and normally finish with
   // Enter. Capture that stream at window level so a focused text field is not
   // required (and mobile devices therefore never open their soft keyboard).
@@ -251,18 +244,9 @@ export function PassengerCheckInPage() {
             </p>
           </div>
           <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'wrap' }}>
-            <form onSubmit={handleScanFormSubmit} style={{ display: 'flex', gap: '.4rem' }}>
-              <input
-                name="qr"
-                className="form-input"
-                autoComplete="off"
-                inputMode="none"
-                placeholder="USB scanner ready"
-                aria-label="USB QR barcode scanner input"
-                title="Scanner capture is active; tap only to enter a code manually"
-                style={{ width: '14rem', padding: '.45rem .6rem' }}
-              />
-            </form>
+            <div role="status" aria-label="QR scanner is ready" style={{ width: '14rem', padding: '.45rem .6rem', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#94a3b8', fontSize: '.85rem' }}>
+              QR scanner ready — no GPS required
+            </div>
             <button type="button" onClick={refresh} className="btn btn-secondary">
               <RefreshCw size={14} /> Refresh
             </button>

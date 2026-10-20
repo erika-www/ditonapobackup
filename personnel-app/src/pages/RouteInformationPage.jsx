@@ -31,12 +31,12 @@ import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, applyRoute4CoordinateOverrides }
 import { parsePassengerQRCode, isPriorityCategory } from '@shared/qrPassUtils';
 import {
   Users, MapPin, ArrowUp, ArrowDown, Play, Pause,
-  RotateCcw, AlertCircle, ShieldCheck, UserCheck,
+  RotateCcw, ShieldCheck, UserCheck,
   Volume2, VolumeX
 } from 'lucide-react';
 
 export function RouteInformationPage() {
-  const { dutySession, updateDutySession, locationPermission, requestLocationPermission, isTestMode } = useAuth();
+  const { dutySession, updateDutySession, isTestMode } = useAuth();
 
   // Current Live Time & Date Today (Hours and Minutes ONLY)
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -313,9 +313,11 @@ export function RouteInformationPage() {
 
     const toRadians = (degrees) => degrees * Math.PI / 180;
 
-    // 1. Device GPS Watcher
+    // 1. Device GPS Watcher (temporarily bypassed). QR registration uses the
+    // stops encoded in the pass and must work from any physical location.
     let watchId = null;
-    if (navigator.geolocation) {
+    const useDeviceGps = false;
+    if (useDeviceGps && navigator.geolocation) {
       watchId = navigator.geolocation.watchPosition((position) => {
         const pLat = position.coords.latitude;
         const pLng = position.coords.longitude;
@@ -703,30 +705,6 @@ export function RouteInformationPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'auto', minHeight: 'calc(100vh - 5rem)', gap: '0.6rem', boxSizing: 'border-box' }}>
-      {/* Location Permission Prompt Banner */}
-      {locationPermission === false && (
-        <div style={{
-          backgroundColor: 'rgba(239, 68, 68, 0.15)',
-          border: '1px solid #ef4444',
-          borderRadius: '8px',
-          padding: '0.5rem 1rem',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          color: '#f87171',
-          fontSize: '0.82rem',
-          flexShrink: 0
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <AlertCircle size={16} color="#ef4444" />
-            <span>Location permission required to pinpoint vehicle position.</span>
-          </div>
-          <button type="button" onClick={requestLocationPermission} className="btn btn-primary" style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}>
-            Enable
-          </button>
-        </div>
-      )}
-
       {/* TOP METRICS BAR */}
       <div className="card" style={{ padding: '0.75rem 1rem', flexShrink: 0, backgroundColor: 'var(--bg-card)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
@@ -774,9 +752,9 @@ export function RouteInformationPage() {
                 </button>
               </div>
 
-              <form onSubmit={async (event) => { event.preventDefault(); const raw = event.currentTarget.elements.qr.value; event.currentTarget.reset(); await handleQrScan(raw); }} style={{ display: 'flex', gap: '.35rem' }}>
-                <input name="qr" className="form-input" autoComplete="off" inputMode="none" placeholder="USB scanner ready" aria-label="USB QR barcode scanner input" title="Scanner capture is active; tap only to enter a code manually" style={{ width: '14rem', padding: '.35rem .55rem', fontSize: '.75rem' }} />
-              </form>
+              <div role="status" aria-label="QR scanner is ready" style={{ width: '14rem', padding: '.35rem .55rem', fontSize: '.75rem', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#94a3b8' }}>
+                QR scanner ready — no GPS required
+              </div>
             </div>
           </div>
 
