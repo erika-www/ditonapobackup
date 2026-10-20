@@ -27,16 +27,18 @@ import {
   fetchBridgeStatus,
   fetchLatestBridgeGps
 } from '../services/busAnnouncerBridge';
-import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, applyRoute4CoordinateOverrides } from '@shared/route4Stops';
+import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, applyRoute4CoordinateOverrides, resolveRoute4Stop } from '@shared/route4Stops';
 import { parsePassengerQRCode, isPriorityCategory } from '@shared/qrPassUtils';
+import { QrCameraScannerModal } from '../components/QrCameraScannerModal';
 import {
   Users, MapPin, ArrowUp, ArrowDown, Play, Pause,
   RotateCcw, ShieldCheck, UserCheck,
-  Volume2, VolumeX
+  Volume2, VolumeX, Camera
 } from 'lucide-react';
 
 export function RouteInformationPage() {
   const { dutySession, updateDutySession, isTestMode } = useAuth();
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
 
   // Current Live Time & Date Today (Hours and Minutes ONLY)
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -100,8 +102,14 @@ export function RouteInformationPage() {
   const tripSegmentKey = `${testRegistryKey}_started_at`;
   const [tripSegmentStartedAt, setTripSegmentStartedAt] = useState(() => Number(localStorage.getItem(tripSegmentKey)) || 0);
   const [passengerRegistry, setPassengerRegistry] = useState(() => {
-    if (!isTestMode) return [];
-    try { return JSON.parse(localStorage.getItem(testRegistryKey) || '[]'); } catch { return []; }
+    try {
+      const plate = dutySession?.plateNumber || 'QC-BUS';
+      const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
+      const saved = localStorage.getItem(key);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
   });
   const [operationalTripId, setOperationalTripId] = useState(null);
 
@@ -124,26 +132,41 @@ export function RouteInformationPage() {
         tripId = trip.success ? trip.data?.id : null;
       }
       if (!tripId) {
-        if (!cancelled && !isTripActive) {
+        if (!cancelled && !isTripActive && !dutySession.tripId) {
           setOperationalTripId(null);
-          setPassengerRegistry([]);
         }
         return;
       }
       const result = await fetchPassengerRegistry(tripId);
-      if (!cancelled && result.success && !isTestMode) {
+      if (!cancelled && result.success) {
         setOperationalTripId(tripId);
-        setPassengerRegistry(result.data);
+        setPassengerRegistry((prevRows) => {
+          const dbRows = result.data || [];
+          const dbIds = new Set(dbRows.map((r) => r.id || r.qr_token));
+          // Preserve any newly scanned local entries that haven't arrived via polling yet
+          const localOnly = prevRows.filter((r) => !dbIds.has(r.id) && (!r.qr_token || !dbIds.has(r.qr_token)));
+          const combined = [...dbRows, ...localOnly];
+          try {
+            const plate = dutySession?.plateNumber || 'QC-BUS';
+            const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
+            localStorage.setItem(key, JSON.stringify(combined));
+          } catch (_) {}
+          return combined;
+        });
       }
     };
     refreshRegistry();
     const timer = setInterval(refreshRegistry, 4000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [dutySession.tripId, dutySession.plateNumber, operationalTripId, isTestMode, tripSegmentStartedAt]);
+  }, [dutySession.tripId, dutySession.plateNumber, operationalTripId, isTestMode, tripSegmentStartedAt, isTripActive, testRegistryKey]);
 
   useEffect(() => {
-    if (isTestMode) localStorage.setItem(testRegistryKey, JSON.stringify(passengerRegistry));
-  }, [isTestMode, passengerRegistry, testRegistryKey]);
+    try {
+      const plate = dutySession?.plateNumber || 'QC-BUS';
+      const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
+      localStorage.setItem(key, JSON.stringify(passengerRegistry));
+    } catch (_) {}
+  }, [isTestMode, passengerRegistry, testRegistryKey, dutySession?.plateNumber]);
 
   const currentStop = stopsList[currentStopIndex] || stopsList[0];
   const normalizeStopName = (name) => String(name || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -164,19 +187,32 @@ export function RouteInformationPage() {
   const availableRegularSeats = Math.max(0, regularSeatCapacity - regularBoarded);
   const totalOnboard = priorityBoarded + regularBoarded;
 
-  // Boarded & Alighting counters per stop
+  // Boarded & Alighting counters per stop using canonical stop resolution
   const passengersBoardedAt = (stopName) => {
-    const norm = normalizeStopName(stopName);
-    return passengerRegistry.filter((journey) => (
-      (journey.status === 'boarded' || journey.status === 'completed') && normalizeStopName(journey.origin_name) === norm
-    )).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
+    const targetCanonical = resolveRoute4Stop(stopName)?.name || stopName;
+    return passengerRegistry.filter((journey) => {
+      const isBoardedOrDone = journey.status === 'boarded' || journey.status === 'completed';
+      const stopCanonical = resolveRoute4Stop(journey.origin_name)?.name || journey.origin_name;
+      return isBoardedOrDone && stopCanonical === targetCanonical;
+    }).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
   };
 
   const passengersAlightingAt = (stopName) => {
-    const norm = normalizeStopName(stopName);
-    return passengerRegistry.filter((journey) => (
-      journey.status === 'boarded' && normalizeStopName(journey.destination_name) === norm
-    )).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
+    const targetCanonical = resolveRoute4Stop(stopName)?.name || stopName;
+    return passengerRegistry.filter((journey) => {
+      const isCurrentlyBoarded = journey.status === 'boarded';
+      const stopCanonical = resolveRoute4Stop(journey.destination_name)?.name || journey.destination_name;
+      return isCurrentlyBoarded && stopCanonical === targetCanonical;
+    }).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
+  };
+
+  const passengersCompletedAlightedAt = (stopName) => {
+    const targetCanonical = resolveRoute4Stop(stopName)?.name || stopName;
+    return passengerRegistry.filter((journey) => {
+      const isCompleted = journey.status === 'completed';
+      const stopCanonical = resolveRoute4Stop(journey.destination_name)?.name || journey.destination_name;
+      return isCompleted && stopCanonical === targetCanonical;
+    }).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
   };
 
   // Match GPS fixes against every stop so missed or out-of-order arrivals can recover.
@@ -404,27 +440,39 @@ export function RouteInformationPage() {
     };
   }, [isTripActive, currentStopIndex, stopsList, dutySession.plateNumber]);
 
-  // QR Code Processing from the embedded USB/RS232-TTL scanner.
+  // Keep a stable ref so keyboard event listener doesn't re-create repeatedly
+  const handleQrScanRef = useRef(null);
+
+  // QR Code Processing from the embedded USB/RS232-TTL scanner or Camera Modal
   const handleQrScan = async (rawCode) => {
     const raw = String(rawCode || '').trim();
     if (!raw) return;
+
+    // Ensure soft keyboard is dismissed on phones/tablets
+    if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
 
     const parsed = parsePassengerQRCode(raw);
     const token = parsed?.tripId || raw.match(/(?:Code|Journey ID|Pass ID):\s*([^\r\n]+)/i)?.[1]?.trim() || raw;
 
     let effectiveTripId = operationalTripId || dutySession?.tripId || null;
-    // Preserve the entire QR payload so its encoded boarding stop,
-    // destination, category and passenger count reach the lookup layer.
     const found = await fetchJourneyByQrToken(raw);
 
     if (!found.success || !found.data) {
-      setStatusMessage(`Hardware scan alert: ${found.error || 'Pass not recognized.'}`);
+      setStatusMessage(`Scan alert: ${found.error || 'Pass not recognized.'}`);
       return;
     }
 
-    const savedTestJourney = passengerRegistry.find((row) => row.qr_token === token || row.id === found.data.id);
+    // Resolve boarding & destination stops against canonical Route 4 stops
+    const resolvedOrigin = resolveRoute4Stop(found.data.origin_name || parsed?.boardingStop) || currentStop || ROUTE4_STOPS[0];
+    const resolvedDestination = resolveRoute4Stop(found.data.destination_name || parsed?.destinationStop) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
+
+    const savedTestJourney = passengerRegistry.find((row) => (row.qr_token && row.qr_token === token) || row.id === found.data.id);
     const journey = savedTestJourney ? { ...found.data, ...savedTestJourney } : found.data;
-    const nextEventType = journey.status === 'boarded' ? 'alight' : 'board';
+    const isCurrentlyBoarded = (savedTestJourney ? savedTestJourney.status === 'boarded' : found.data.status === 'boarded');
+    const nextEventType = isCurrentlyBoarded ? 'alight' : 'board';
+
     const isPri = isPriorityCategory(journey.passenger_category || journey.profiles?.passenger_category || journey.category);
     const cat = journey.passenger_category || journey.profiles?.passenger_category || journey.category || 'Regular';
     const count = Math.max(1, Number(journey.count || parsed?.count) || 1);
@@ -446,20 +494,24 @@ export function RouteInformationPage() {
         qr_token: token,
         count,
         passenger_category: cat,
-        passenger_name: 'Anonymous Passenger',
-        origin_name: journey.origin_name || parsed?.boardingStop || currentStop.name,
-        destination_name: journey.destination_name || parsed?.destinationStop || currentStop.name,
+        passenger_name: 'Anonymous Commuter',
+        origin_name: resolvedOrigin.name,
+        destination_name: resolvedDestination.name,
         status: nextEventType === 'board' ? 'boarded' : 'completed'
       };
       setPassengerRegistry((rows) => {
-        const exists = rows.some((row) => row.qr_token === token || row.id === updatedJourney.id);
-        return exists
-          ? rows.map((row) => row.qr_token === token || row.id === updatedJourney.id ? updatedJourney : row)
+        const exists = rows.some((row) => (row.qr_token && row.qr_token === token) || row.id === updatedJourney.id);
+        const nextRows = exists
+          ? rows.map((row) => ((row.qr_token && row.qr_token === token) || row.id === updatedJourney.id) ? updatedJourney : row)
           : [...rows, updatedJourney];
+        try {
+          localStorage.setItem(testRegistryKey, JSON.stringify(nextRows));
+        } catch (_) {}
+        return nextRows;
       });
       setStatusMessage(nextEventType === 'board'
-        ? `Passenger boarded: ${count} passenger${count === 1 ? '' : 's'} (${cat}). ${Math.max(0, capacity - totalOnboard - count)} seats available.`
-        : `Passenger alighted: ${count} seat${count === 1 ? '' : 's'} restored at ${currentStop.name}.`);
+        ? `✓ ${count} passenger${count === 1 ? '' : 's'} boarded (${cat}). Total Onboard: ${totalOnboard + count}/${capacity}. Boarded at: ${resolvedOrigin.name} → Destination: ${resolvedDestination.name}.`
+        : `✓ ${count} passenger${count === 1 ? '' : 's'} alighted at ${resolvedDestination.name}. ${count} seat${count === 1 ? '' : 's'} restored. Total Onboard: ${Math.max(0, totalOnboard - count)}/${capacity}.`);
       return;
     }
 
@@ -467,12 +519,52 @@ export function RouteInformationPage() {
       try {
         effectiveTripId = await ensureOperationalTrip();
       } catch (error) {
-        setStatusMessage(`Passenger count was not changed: ${error.message}`);
-        return;
+        effectiveTripId = dutySession?.tripId || 'operational-trip';
       }
     }
 
-    const result = await recordBoardingEvent({
+    const now = new Date().toISOString();
+    const updatedJourney = {
+      ...journey,
+      trip_id: effectiveTripId,
+      qr_token: journey.qr_token || token,
+      count,
+      origin_name: resolvedOrigin.name,
+      destination_name: resolvedDestination.name,
+      status: nextEventType === 'board' ? 'boarded' : 'completed',
+      boarded_at: nextEventType === 'board' ? (journey.boarded_at || now) : journey.boarded_at,
+      alighted_at: nextEventType === 'alight' ? now : journey.alighted_at
+    };
+
+    // Update the journey immediately so boarded-at-stop, alighting-at-stop,
+    // and onboard totals all react to this scan without waiting for polling.
+    setPassengerRegistry((rows) => {
+      const exists = rows.some((row) => row.id === updatedJourney.id || (row.qr_token && row.qr_token === token));
+      const nextRows = exists
+        ? rows.map((row) => (row.id === updatedJourney.id || (row.qr_token && row.qr_token === token)) ? { ...row, ...updatedJourney } : row)
+        : [...rows, updatedJourney];
+      try {
+        const plate = dutySession?.plateNumber || 'QC-BUS';
+        localStorage.setItem(`qcbus_registry_${plate}`, JSON.stringify(nextRows));
+      } catch (_) {}
+      return nextRows;
+    });
+
+    if (nextEventType === 'board') {
+      const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - count) : availablePrioritySeats;
+      const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - count) : availableRegularSeats;
+      const newTotal = totalOnboard + count;
+      setStatusMessage(
+        `✓ ${count} PASSENGER${count === 1 ? '' : 'S'} BOARDED (${cat}). Total Onboard: ${newTotal}/${busCapacity}. Remaining Seats: ${remainingPriority} Priority / ${remainingRegular} Regular. Boarding at: ${resolvedOrigin.name} → Destination: ${resolvedDestination.name}.`
+      );
+    } else {
+      const newTotal = Math.max(0, totalOnboard - count);
+      setStatusMessage(
+        `✓ ${count} PASSENGER${count === 1 ? '' : 'S'} ALIGHTED at ${resolvedDestination.name}. ${count} seat${count === 1 ? '' : 's'} restored. Total Onboard: ${newTotal}/${busCapacity}.`
+      );
+    }
+
+    await recordBoardingEvent({
       tripId: effectiveTripId,
       eventType: nextEventType,
       method: 'qr',
@@ -481,46 +573,24 @@ export function RouteInformationPage() {
       idempotencyKey: `qr-${journey.id}-${nextEventType}-${Date.now()}`
     });
 
-    if (!result.success) {
-      setStatusMessage(`Scan recorded with notice: ${result.error}`);
-    } else {
-      const updatedJourney = {
-        ...journey,
-        trip_id: effectiveTripId,
-        qr_token: journey.qr_token || token,
-        count,
-        origin_name: parsed?.boardingStop || journey.origin_name || currentStop.name,
-        destination_name: parsed?.destinationStop || journey.destination_name || 'Destination',
-        status: nextEventType === 'board' ? 'boarded' : 'completed',
-        boarded_at: nextEventType === 'board' ? (journey.boarded_at || new Date().toISOString()) : journey.boarded_at,
-        alighted_at: nextEventType === 'alight' ? (journey.alighted_at || new Date().toISOString()) : journey.alighted_at
-      };
-      // Update the journey immediately so boarded-at-stop, alighting-at-stop,
-      // and onboard totals all react to this scan without waiting for polling.
-      setPassengerRegistry((rows) => {
-        const exists = rows.some((row) => row.id === updatedJourney.id || row.qr_token === token);
-        return exists
-          ? rows.map((row) => row.id === updatedJourney.id || row.qr_token === token ? { ...row, ...updatedJourney } : row)
-          : [...rows, updatedJourney];
-      });
-
-      if (nextEventType === 'board') {
-        const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - count) : availablePrioritySeats;
-        const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - count) : availableRegularSeats;
-        setStatusMessage(
-          `✓ ${count} PASSENGER${count === 1 ? '' : 'S'} BOARDED (${cat}). Decremented ${isPri ? `Priority Seats (${remainingPriority}/${prioritySeatCapacity})` : `Regular Seats (${remainingRegular}/${regularSeatCapacity})`}. Boarding: ${journey.origin_name || currentStop.name} → Alights: ${journey.destination_name || 'Destination'}.`
-        );
-      } else {
-        setStatusMessage(`✓ ${count} PASSENGER${count === 1 ? '' : 'S'} ALIGHTED at ${journey.destination_name || currentStop.name}. ${count} seat${count === 1 ? '' : 's'} restored.`);
-      }
-    }
-
-    // Refresh passenger registry
+    // Refresh passenger registry in background
     if (effectiveTripId) {
-      const reg = await fetchPassengerRegistry(effectiveTripId);
-      if (reg.success) setPassengerRegistry(reg.data);
+      fetchPassengerRegistry(effectiveTripId).then((reg) => {
+        if (reg.success && reg.data) {
+          setPassengerRegistry((prevRows) => {
+            const dbRows = reg.data || [];
+            const dbIds = new Set(dbRows.map((r) => r.id || r.qr_token));
+            const localOnly = prevRows.filter((r) => !dbIds.has(r.id) && (!r.qr_token || !dbIds.has(r.qr_token)));
+            return [...dbRows, ...localOnly];
+          });
+        }
+      });
     }
   };
+
+  useEffect(() => {
+    handleQrScanRef.current = handleQrScan;
+  });
 
   // Capture keyboard-wedge scanners without focusing an input. This keeps the
   // on-screen keyboard closed on phones/tablets while scans continue to work.
@@ -538,7 +608,12 @@ export function RouteInformationPage() {
         window.clearTimeout(scannerResetTimerRef.current);
         if (scannedValue) {
           event.preventDefault();
-          handleQrScan(scannedValue);
+          if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+            document.activeElement.blur();
+          }
+          if (handleQrScanRef.current) {
+            handleQrScanRef.current(scannedValue);
+          }
         }
         return;
       }
@@ -557,7 +632,7 @@ export function RouteInformationPage() {
       window.removeEventListener('keydown', onScannerKeyDown);
       window.clearTimeout(scannerResetTimerRef.current);
     };
-  });
+  }, []);
 
   // Start / Restart Another Trip Handler
   const handleStartAnotherTrip = async (forceNewTrip = false) => {
@@ -751,6 +826,21 @@ export function RouteInformationPage() {
                   Southbound <ArrowDown size={12} />
                 </button>
               </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+                    document.activeElement.blur();
+                  }
+                  setIsCameraOpen(true);
+                }}
+                className="btn btn-primary"
+                style={{ padding: '0.2rem 0.65rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.3rem', backgroundColor: '#0284c7', borderColor: '#0284c7' }}
+                title="Open Camera QR Scanner"
+              >
+                <Camera size={13} /> Scan Pass
+              </button>
 
               <div role="status" aria-label="QR scanner is ready" style={{ width: '14rem', padding: '.35rem .55rem', fontSize: '.75rem', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#94a3b8' }}>
                 QR scanner ready — no GPS required
@@ -948,6 +1038,7 @@ export function RouteInformationPage() {
             const isPassed = idx < currentStopIndex;
             const boardedCount = passengersBoardedAt(s.name);
             const alightingCount = passengersAlightingAt(s.name);
+            const completedAlightedCount = passengersCompletedAlightedAt(s.name);
 
             return (
               <div
@@ -997,16 +1088,24 @@ export function RouteInformationPage() {
                 </div>
 
                 {/* BOARDED & ALIGHTING BADGES */}
-                <div style={{ display: 'flex', gap: '.35rem', marginTop: '.45rem', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: '.3rem', marginTop: '.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
                   {boardedCount > 0 && (
-                    <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(16,185,129,.2)', border: '1px solid #10b981', color: '#34d399', fontSize: '.68rem', fontWeight: 700 }}>
+                    <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(16,185,129,.2)', border: '1px solid #10b981', color: '#34d399', fontSize: '.68rem', fontWeight: 700 }} title={`${boardedCount} boarded at this stop`}>
                       ↑ {boardedCount} boarded
                     </span>
                   )}
                   {alightingCount > 0 && (
-                    <span style={{ display: 'block', flexBasis: '100%', color: '#ef4444', fontSize: '.72rem', fontWeight: 800 }}>
-                      Passengers Alighting: {alightingCount}
+                    <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(239,68,68,.18)', border: '1px solid #ef4444', color: '#f87171', fontSize: '.68rem', fontWeight: 800 }} title={`${alightingCount} passengers to alight here`}>
+                      ↓ {alightingCount} alighting
                     </span>
+                  )}
+                  {completedAlightedCount > 0 && (
+                    <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(148,163,184,.15)', border: '1px solid #64748b', color: '#94a3b8', fontSize: '.68rem', fontWeight: 600 }} title={`${completedAlightedCount} passengers already alighted here`}>
+                      ✓ {completedAlightedCount} alighted
+                    </span>
+                  )}
+                  {boardedCount === 0 && alightingCount === 0 && completedAlightedCount === 0 && (
+                    <span style={{ fontSize: '.65rem', color: '#64748b' }}>0 pax</span>
                   )}
                 </div>
               </div>
@@ -1037,6 +1136,14 @@ export function RouteInformationPage() {
           </button>
         </div>
       </div>
+
+      {/* CAMERA SCANNER MODAL */}
+      <QrCameraScannerModal
+        isOpen={isCameraOpen}
+        onClose={() => setIsCameraOpen(false)}
+        onScan={handleQrScan}
+        title="Route 4 QR Pass Scanner"
+      />
     </div>
   );
 }

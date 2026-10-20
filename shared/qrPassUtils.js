@@ -99,47 +99,77 @@ export function createPassengerQrPayload({
  */
 export function parsePassengerQRCode(raw) {
   if (!raw) return null;
+
+  // 0. Direct object input
+  if (typeof raw === 'object' && raw !== null) {
+    const tripId = raw.tripId || raw.passId || raw.id || raw.dailyTripId || raw.qr_token || raw.token || 'PASS-00001';
+    const count = Number(raw.count || raw.passengerCount || raw.passenger_count || raw.totalPassengers || raw.passengers || 1);
+    const companions = Number(raw.companions != null ? raw.companions : (count > 1 ? count - 1 : 0));
+    const category = raw.category || raw.passengerCategory || raw.passenger_category || 'Regular';
+    const boardingStop = raw.boardingStop || raw.origin_name || raw.origin || raw.fromStop || raw.from || '';
+    const destinationStop = raw.destinationStop || raw.destination_name || raw.destination || raw.toStop || raw.to || '';
+
+    return {
+      tripId: String(tripId).trim(),
+      count: isNaN(count) || count < 1 ? 1 : count,
+      companions: isNaN(companions) || companions < 0 ? 0 : companions,
+      category: String(category).trim(),
+      isPriority: isPriorityCategory(category),
+      boardingStop: String(boardingStop).trim(),
+      destinationStop: String(destinationStop).trim(),
+      busPlate: String(raw.busPlate || raw.plateNumber || '').trim(),
+      raw: JSON.stringify(raw)
+    };
+  }
+
   const str = String(raw).trim();
 
-  // 1. JSON parsing
+  // 1. JSON parsing (including embedded JSON within brackets)
   try {
-    const data = JSON.parse(str);
-    if (data && (data.tripId || data.passId || data.id)) {
-      const tripId = data.tripId || data.passId || data.id;
-      const count = Number(data.count || data.passengerCount || data.totalPassengers || 1);
+    let jsonStr = str;
+    const firstBrace = str.indexOf('{');
+    const lastBrace = str.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      jsonStr = str.substring(firstBrace, lastBrace + 1);
+    }
+    const data = JSON.parse(jsonStr);
+    if (data && (data.tripId || data.passId || data.id || data.dailyTripId || data.qr_token || data.token || data.boardingStop || data.origin_name || data.origin)) {
+      const tripId = data.tripId || data.passId || data.id || data.dailyTripId || data.qr_token || data.token || generateDailyTripId();
+      const count = Number(data.count || data.passengerCount || data.passenger_count || data.totalPassengers || data.passengers || 1);
       const companions = Number(data.companions != null ? data.companions : (count > 1 ? count - 1 : 0));
-      const category = data.category || data.passengerCategory || 'Regular';
-      const boardingStop = data.boardingStop || data.origin || '';
-      const destinationStop = data.destinationStop || data.destination || '';
+      const category = data.category || data.passengerCategory || data.passenger_category || 'Regular';
+      const boardingStop = data.boardingStop || data.origin_name || data.origin || data.fromStop || data.from || '';
+      const destinationStop = data.destinationStop || data.destination_name || data.destination || data.toStop || data.to || '';
 
       return {
-        tripId,
+        tripId: String(tripId).trim(),
         count: isNaN(count) || count < 1 ? 1 : count,
         companions: isNaN(companions) || companions < 0 ? 0 : companions,
-        category,
+        category: String(category).trim(),
         isPriority: isPriorityCategory(category),
-        boardingStop,
-        destinationStop,
-        busPlate: data.busPlate || '',
+        boardingStop: String(boardingStop).trim(),
+        destinationStop: String(destinationStop).trim(),
+        busPlate: String(data.busPlate || data.plateNumber || '').trim(),
         raw: str
       };
     }
   } catch (_) { }
 
   // 2. Formatted Multi-line or Key-Value text
-  const tripIdMatch = str.match(/(?:Trip ID|Journey ID|Pass ID|Code):\s*([0-9]{6}-[0-9]{5}|[A-Za-z0-9_-]+)/i);
-  const catMatch = str.match(/(?:Category|Passenger Category):\s*([^\r\n]+)/i);
-  const boardMatch = str.match(/(?:Boarding Stop|Boarding|From):\s*([^\r\n]+)/i);
-  const destMatch = str.match(/(?:Destination Stop|Destination|To):\s*([^\r\n]+)/i);
-  const countMatch = str.match(/(?:Count|Passengers):\s*([0-9]+)/i);
-  const busMatch = str.match(/(?:Assigned Bus|Bus Plate|Bus):\s*([^\r\n]+)/i);
+  const tripIdMatch = str.match(/(?:Trip ID|Journey ID|Pass ID|Pass|Ticket|Code):\s*([0-9]{6}-[0-9]{5}|[A-Za-z0-9_-]+)/i);
+  const catMatch = str.match(/(?:Category|Passenger Category|Type):\s*([^\r\n,]+)/i);
+  const boardMatch = str.match(/(?:Boarding Stop|Boarding|Origin|From):\s*([^\r\n,]+)/i);
+  const destMatch = str.match(/(?:Destination Stop|Destination|Dropoff|To):\s*([^\r\n,]+)/i);
+  const countMatch = str.match(/(?:Count|Passengers|Pax|Seats|Qty):\s*([0-9]+)/i);
+  const busMatch = str.match(/(?:Assigned Bus|Bus Plate|Bus|Unit):\s*([^\r\n,]+)/i);
 
-  if (tripIdMatch) {
+  if (tripIdMatch || boardMatch || destMatch) {
     const category = catMatch ? catMatch[1].trim() : 'Regular';
     const count = countMatch ? Number.parseInt(countMatch[1], 10) : 1;
     return {
-      tripId: tripIdMatch[1].trim(),
+      tripId: tripIdMatch ? tripIdMatch[1].trim() : (str.match(/\b([0-9]{6}-[0-9]{5})\b/)?.[1] || generateDailyTripId()),
       count: isNaN(count) || count < 1 ? 1 : count,
+      companions: count > 1 ? count - 1 : 0,
       category,
       isPriority: isPriorityCategory(category),
       boardingStop: boardMatch ? boardMatch[1].trim() : '',
@@ -161,11 +191,13 @@ export function parsePassengerQRCode(raw) {
       const destinationStop = parts[idIdx + 4] || '';
       return {
         tripId,
-        count,
+        count: isNaN(count) || count < 1 ? 1 : count,
+        companions: count > 1 ? count - 1 : 0,
         category,
         isPriority: isPriorityCategory(category),
         boardingStop,
         destinationStop,
+        busPlate: '',
         raw: str
       };
     }
@@ -177,10 +209,12 @@ export function parsePassengerQRCode(raw) {
     return {
       tripId: standaloneId[1],
       count: 1,
+      companions: 0,
       category: 'Regular',
       isPriority: false,
       boardingStop: '',
       destinationStop: '',
+      busPlate: '',
       raw: str
     };
   }
@@ -188,10 +222,12 @@ export function parsePassengerQRCode(raw) {
   return {
     tripId: str.slice(0, 32),
     count: 1,
+    companions: 0,
     category: 'Regular',
     isPriority: false,
     boardingStop: '',
     destinationStop: '',
+    busPlate: '',
     raw: str
   };
 }
