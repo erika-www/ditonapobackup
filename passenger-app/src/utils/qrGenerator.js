@@ -32,15 +32,17 @@ export async function drawQRCodeCanvas(
   const resolvedTripId = passId || (typeof dataString === 'string' && /^\d{6}-\d{5}$/.test(dataString) ? dataString : (dataString ? dataString.slice(0, 16) : 'PASS-00001'));
 
   // Build the clean, standardized JSON QR payload that any scanner can parse
-  const qrPayload = createPassengerQrPayload({
-    tripId: resolvedTripId,
-    count: totalPax,
-    companions: companions,
-    category: category || 'Regular',
-    boardingStop: fromStop,
-    destinationStop: toStop,
-    busPlate: busPlate || 'QC-BUS'
-  });
+  const qrPayload = (typeof dataString === 'string' && dataString.trim().startsWith('{'))
+    ? dataString
+    : createPassengerQrPayload({
+        tripId: resolvedTripId,
+        count: totalPax,
+        companions: companions,
+        category: category || 'Regular',
+        boardingStop: fromStop,
+        destinationStop: toStop,
+        busPlate: busPlate || 'QC-BUS'
+      });
 
   try {
     // Generate crisp QR code matrix onto the canvas matching Image 2 layout

@@ -53,6 +53,29 @@ export function generateDailyTripId(options = {}) {
 }
 
 /**
+ * Extracts a human-readable stop name from either a string or an object with name/title/label
+ */
+export function extractStopName(s) {
+  if (!s) return '';
+  if (typeof s === 'string') return s.trim();
+  if (typeof s === 'object' && s !== null) {
+    return (
+      s.name ||
+      s.stopName ||
+      s.stop_name ||
+      s.origin_name ||
+      s.destination_name ||
+      s.title ||
+      s.label ||
+      s.landmark ||
+      s.stop ||
+      ''
+    ).trim();
+  }
+  return String(s).trim();
+}
+
+/**
  * Creates the canonical, fully readable JSON QR payload string
  */
 export function createPassengerQrPayload({
@@ -75,6 +98,8 @@ export function createPassengerQrPayload({
 
   const companionsCount = Number(companions) >= 0 ? Number(companions) : Math.max(0, (Number(count) || 1) - 1);
   const totalPax = Math.max(1, Number(count) || (companionsCount + 1));
+  const bStop = extractStopName(boardingStop);
+  const dStop = extractStopName(destinationStop);
 
   const payload = {
     tripId: resolvedTripId,
@@ -84,8 +109,18 @@ export function createPassengerQrPayload({
     companions: companionsCount,
     count: totalPax,
     totalPassengers: totalPax,
-    boardingStop: String(boardingStop || '').trim(),
-    destinationStop: String(destinationStop || '').trim(),
+    boardingStop: bStop,
+    destinationStop: dStop,
+    boarding_stop: bStop,
+    destination_stop: dStop,
+    origin_name: bStop,
+    destination_name: dStop,
+    alightingStop: dStop,
+    alighting_stop: dStop,
+    fromStop: bStop,
+    toStop: dStop,
+    from: bStop,
+    to: dStop,
     busPlate: String(busPlate || '').trim(),
     date: `${now.getFullYear()}-${mm}-${dd}`
   };
@@ -100,14 +135,26 @@ export function createPassengerQrPayload({
 export function parsePassengerQRCode(raw) {
   if (!raw) return null;
 
+  const getOrigin = (o) => extractStopName(
+    o.boardingStop || o.boarding_stop || o.origin_name || o.origin ||
+    o.fromStop || o.from_stop || o.from || o.startStop || o.start_stop ||
+    o.pickupStop || o.pickup_stop || o.pickup || o.boarding || ''
+  );
+  const getDest = (o) => extractStopName(
+    o.destinationStop || o.destination_stop || o.alightingStop || o.alighting_stop ||
+    o.destination_name || o.destination || o.toStop || o.to_stop || o.to ||
+    o.endStop || o.end_stop || o.dropoffStop || o.dropoff_stop || o.dropoff ||
+    o.alighting || ''
+  );
+
   // 0. Direct object input
   if (typeof raw === 'object' && raw !== null) {
-    const tripId = raw.tripId || raw.passId || raw.id || raw.dailyTripId || raw.qr_token || raw.token || 'PASS-00001';
+    const tripId = raw.tripId || raw.trip_id || raw.passId || raw.id || raw.dailyTripId || raw.qr_token || raw.token || 'PASS-00001';
     const count = Number(raw.count || raw.passengerCount || raw.passenger_count || raw.totalPassengers || raw.passengers || 1);
     const companions = Number(raw.companions != null ? raw.companions : (count > 1 ? count - 1 : 0));
     const category = raw.category || raw.passengerCategory || raw.passenger_category || 'Regular';
-    const boardingStop = raw.boardingStop || raw.origin_name || raw.origin || raw.fromStop || raw.from || '';
-    const destinationStop = raw.destinationStop || raw.destination_name || raw.destination || raw.toStop || raw.to || '';
+    const boardingStop = getOrigin(raw);
+    const destinationStop = getDest(raw);
 
     return {
       tripId: String(tripId).trim(),
@@ -115,9 +162,9 @@ export function parsePassengerQRCode(raw) {
       companions: isNaN(companions) || companions < 0 ? 0 : companions,
       category: String(category).trim(),
       isPriority: isPriorityCategory(category),
-      boardingStop: String(boardingStop).trim(),
-      destinationStop: String(destinationStop).trim(),
-      busPlate: String(raw.busPlate || raw.plateNumber || '').trim(),
+      boardingStop,
+      destinationStop,
+      busPlate: String(raw.busPlate || raw.plateNumber || raw.bus_plate || '').trim(),
       raw: JSON.stringify(raw)
     };
   }
@@ -133,13 +180,13 @@ export function parsePassengerQRCode(raw) {
       jsonStr = str.substring(firstBrace, lastBrace + 1);
     }
     const data = JSON.parse(jsonStr);
-    if (data && (data.tripId || data.passId || data.id || data.dailyTripId || data.qr_token || data.token || data.boardingStop || data.origin_name || data.origin)) {
-      const tripId = data.tripId || data.passId || data.id || data.dailyTripId || data.qr_token || data.token || generateDailyTripId();
+    if (data && (data.tripId || data.trip_id || data.passId || data.id || data.dailyTripId || data.qr_token || data.token || getOrigin(data) || getDest(data))) {
+      const tripId = data.tripId || data.trip_id || data.passId || data.id || data.dailyTripId || data.qr_token || data.token || generateDailyTripId();
       const count = Number(data.count || data.passengerCount || data.passenger_count || data.totalPassengers || data.passengers || 1);
       const companions = Number(data.companions != null ? data.companions : (count > 1 ? count - 1 : 0));
       const category = data.category || data.passengerCategory || data.passenger_category || 'Regular';
-      const boardingStop = data.boardingStop || data.origin_name || data.origin || data.fromStop || data.from || '';
-      const destinationStop = data.destinationStop || data.destination_name || data.destination || data.toStop || data.to || '';
+      const boardingStop = getOrigin(data);
+      const destinationStop = getDest(data);
 
       return {
         tripId: String(tripId).trim(),
@@ -147,9 +194,9 @@ export function parsePassengerQRCode(raw) {
         companions: isNaN(companions) || companions < 0 ? 0 : companions,
         category: String(category).trim(),
         isPriority: isPriorityCategory(category),
-        boardingStop: String(boardingStop).trim(),
-        destinationStop: String(destinationStop).trim(),
-        busPlate: String(data.busPlate || data.plateNumber || '').trim(),
+        boardingStop,
+        destinationStop,
+        busPlate: String(data.busPlate || data.plateNumber || data.bus_plate || '').trim(),
         raw: str
       };
     }
@@ -158,8 +205,8 @@ export function parsePassengerQRCode(raw) {
   // 2. Formatted Multi-line or Key-Value text
   const tripIdMatch = str.match(/(?:Trip ID|Journey ID|Pass ID|Pass|Ticket|Code):\s*([0-9]{6}-[0-9]{5}|[A-Za-z0-9_-]+)/i);
   const catMatch = str.match(/(?:Category|Passenger Category|Type):\s*([^\r\n,]+)/i);
-  const boardMatch = str.match(/(?:Boarding Stop|Boarding|Origin|From):\s*([^\r\n,]+)/i);
-  const destMatch = str.match(/(?:Destination Stop|Destination|Dropoff|To):\s*([^\r\n,]+)/i);
+  const boardMatch = str.match(/(?:Boarding Stop|Boarding|Origin|From|Pickup|Start Stop|Start):\s*([^\r\n,]+)/i);
+  const destMatch = str.match(/(?:Destination Stop|Destination|Alighting Stop|Alighting|Dropoff|To|End Stop|End):\s*([^\r\n,]+)/i);
   const countMatch = str.match(/(?:Count|Passengers|Pax|Seats|Qty):\s*([0-9]+)/i);
   const busMatch = str.match(/(?:Assigned Bus|Bus Plate|Bus|Unit):\s*([^\r\n,]+)/i);
 
@@ -172,8 +219,8 @@ export function parsePassengerQRCode(raw) {
       companions: count > 1 ? count - 1 : 0,
       category,
       isPriority: isPriorityCategory(category),
-      boardingStop: boardMatch ? boardMatch[1].trim() : '',
-      destinationStop: destMatch ? destMatch[1].trim() : '',
+      boardingStop: boardMatch ? extractStopName(boardMatch[1]) : '',
+      destinationStop: destMatch ? extractStopName(destMatch[1]) : '',
       busPlate: busMatch ? busMatch[1].trim() : '',
       raw: str
     };
@@ -187,8 +234,8 @@ export function parsePassengerQRCode(raw) {
       const tripId = parts[idIdx];
       const count = Number(parts[idIdx + 1]) || 1;
       const category = parts[idIdx + 2] || 'Regular';
-      const boardingStop = parts[idIdx + 3] || '';
-      const destinationStop = parts[idIdx + 4] || '';
+      const boardingStop = extractStopName(parts[idIdx + 3]) || '';
+      const destinationStop = extractStopName(parts[idIdx + 4]) || '';
       return {
         tripId,
         count: isNaN(count) || count < 1 ? 1 : count,

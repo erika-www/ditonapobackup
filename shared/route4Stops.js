@@ -48,6 +48,8 @@ function canonWord(w) {
   if (w === 'ave') return 'avenue';
   if (w === 'rd') return 'road';
   if (w === 'st') return 'street';
+  if (w === 'blvd') return 'boulevard';
+  if (w === 'hwy') return 'highway';
   return w;
 }
 
@@ -55,7 +57,7 @@ function tokenizeStop(s) {
   return String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim().split(' ')
     .map(canonWord)
-    .filter((w) => w && !['the', 'and', 'cor', 'corner', 'ave', 'avenue', 'rd', 'road', 'st', 'street'].includes(w));
+    .filter((w) => w && !['the', 'and', 'cor', 'corner', 'ave', 'avenue', 'rd', 'road', 'st', 'street', 'hwy', 'highway'].includes(w));
 }
 
 /**
@@ -64,28 +66,60 @@ function tokenizeStop(s) {
  */
 export function resolveRoute4Stop(input) {
   if (!input) return null;
-  if (typeof input === 'object' && input.name) {
-    const matched = ROUTE4_STOPS.find((s) => s.id === input.id || s.name === input.name);
-    if (matched) return matched;
+  if (typeof input === 'object' && input !== null) {
+    const candidateName = input.name || input.stopName || input.origin_name || input.destination_name || input.title || '';
+    if (candidateName) {
+      const match = resolveRoute4Stop(candidateName);
+      if (match) return match;
+    }
+    if (input.id) {
+      const matchedId = ROUTE4_STOPS.find((s) => s.id === input.id);
+      if (matchedId) return matchedId;
+    }
   }
 
-  // 1. Check numeric stop index (e.g. "Stop 1", "1", "stop-1")
-  const numMatch = String(input).match(/^(?:stop\s*[-_]?)?([0-9]{1,2})$/i)
-    || String(input).match(/stop\s*[-_]?([0-9]{1,2})/i);
+  const rawStr = String(input || '').trim();
+  if (!rawStr) return null;
+
+  // 1. Direct number or 'Stop X' match (e.g. 'Stop 1', 'Stop 15', '1', '15', 'stop-1')
+  const numMatch = rawStr.match(/^(?:stop\s*[-_:]?\s*)?([0-9]{1,2})$/i)
+    || rawStr.match(/\bstop\s*[-_:]?\s*([0-9]{1,2})\b/i);
   if (numMatch) {
     const idx = Number.parseInt(numMatch[1], 10) - 1;
-    if (ROUTE4_STOPS[idx]) return ROUTE4_STOPS[idx];
+    if (idx >= 0 && idx < ROUTE4_STOPS.length) {
+      return ROUTE4_STOPS[idx];
+    }
   }
 
-  // 2. Exact alphanumeric normalized match
-  const cleanInput = String(input).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  // 2. Exact normalized comparison
+  const clean = rawStr.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const exact = ROUTE4_STOPS.find((s) => (
-    s.name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '') === cleanInput
+    s.name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '') === clean
   ));
   if (exact) return exact;
 
-  // 3. Token-based Jaccard similarity match
-  const inTokens = tokenizeStop(input);
+  // 3. High-priority keyword and landmark mappings
+  const lower = rawStr.toLowerCase();
+  if (lower.includes('sb road') || lower.includes('sb terminal') || (lower.includes('general luis') && !lower.includes('bayan') && !lower.includes('banahaw')) || (lower.includes('gen. luis') && !lower.includes('bayan') && !lower.includes('banahaw'))) {
+    return ROUTE4_STOPS[14]; // Stop 15
+  }
+  if (lower.includes('banahaw')) return ROUTE4_STOPS[13]; // Stop 14
+  if (lower.includes('bayan') || lower.includes('nova bayan')) return ROUTE4_STOPS[12]; // Stop 13
+  if (lower.includes('forest hills')) return ROUTE4_STOPS[11]; // Stop 12
+  if (lower.includes('sm novaliches') || lower.includes('sm city')) return ROUTE4_STOPS[10]; // Stop 11
+  if (lower.includes('qcu') || lower.includes('quezon city university') || lower.includes('novaliches district hospital') || lower.includes('ndh')) return ROUTE4_STOPS[9]; // Stop 10
+  if (lower.includes('sauyo')) return ROUTE4_STOPS[7]; // Stop 8
+  if (lower.includes('munoz') || lower.includes('muñoz')) return ROUTE4_STOPS[6]; // Stop 7
+  if (lower.includes('tandang sora')) return ROUTE4_STOPS[5]; // Stop 6
+  if (lower.includes('congressional')) return ROUTE4_STOPS[4]; // Stop 5
+  if (lower.includes('tullahan')) return ROUTE4_STOPS[3]; // Stop 4
+  if (lower.includes('road 1') || lower.includes('rd 1') || lower.includes('rd. 1')) return ROUTE4_STOPS[2]; // Stop 3
+  if (lower.includes('veterans') || lower.includes('vmmc') || lower.includes('vertis')) return ROUTE4_STOPS[1]; // Stop 2
+  if (lower.includes('qc hall') || lower.includes('quezon city hall') || lower.includes('nha') || lower.includes('elliptical')) return ROUTE4_STOPS[0]; // Stop 1
+  if (lower.includes('quirino') && lower.includes('mindanao')) return ROUTE4_STOPS[8]; // Stop 9
+
+  // 4. Token Jaccard similarity fallback
+  const inTokens = tokenizeStop(rawStr);
   if (!inTokens.length) return null;
 
   let best = null;
@@ -101,6 +135,6 @@ export function resolveRoute4Stop(input) {
     }
   }
 
-  if (bestScore >= 0.25) return best;
+  if (bestScore >= 0.20) return best;
   return null;
 }

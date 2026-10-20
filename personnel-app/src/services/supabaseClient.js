@@ -771,7 +771,7 @@ export async function fetchPassengerRegistry(tripId) {
   }
 }
 
-export async function fetchJourneyByQrToken(rawToken) {
+export async function fetchJourneyByQrToken(rawToken, currentStop = null) {
   try {
     const parsed = parsePassengerQRCode(rawToken);
     const searchToken = parsed?.tripId || (typeof rawToken === 'string' ? rawToken.trim() : '');
@@ -794,8 +794,12 @@ export async function fetchJourneyByQrToken(rawToken) {
     }
 
     // Resolve boarding & destination stops against canonical Route 4 stops
-    const resolvedOrigin = resolveRoute4Stop(parsed?.boardingStop || data?.origin_name) || ROUTE4_STOPS[0];
-    const resolvedDestination = resolveRoute4Stop(parsed?.destinationStop || data?.destination_name) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
+    // Prefer explicit stop from QR, then database record, then current bus stop
+    const rawOrigin = parsed?.boardingStop || data?.origin_name || (currentStop ? (currentStop.name || currentStop) : null);
+    const resolvedOrigin = resolveRoute4Stop(rawOrigin) || (currentStop ? resolveRoute4Stop(currentStop) : null) || ROUTE4_STOPS[0];
+
+    const rawDest = parsed?.destinationStop || data?.destination_name;
+    const resolvedDestination = resolveRoute4Stop(rawDest) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
 
     if (data) {
       const cat = data.passenger_category || parsed?.category || data.profiles?.passenger_category || 'Regular';
@@ -1031,21 +1035,35 @@ export async function publishCurrentBusLocation(busId, position) {
   }
 }
 
-export async function createManualPassengerJourney({ passengerName, passengerCategory, origin, destination, tripId, routeDirection }) {
+export async function createManualPassengerJourney({
+  passengerName,
+  passengerCategory,
+  origin,
+  destination,
+  tripId,
+  routeDirection,
+  passengerCount = 1,
+  status = 'boarded'
+}) {
   try {
+    const canonicalOrigin = resolveRoute4Stop(origin)?.name || (typeof origin === 'string' ? origin.trim() : 'Quezon City Hall');
+    const canonicalDest = resolveRoute4Stop(destination)?.name || (typeof destination === 'string' ? destination.trim() : 'General Luis / Banahaw');
+    const count = Math.max(1, Number(passengerCount) || 1);
+    const cat = passengerCategory || 'Regular';
+
     const payload = {
-      passenger_name: passengerName.trim(),
-      passenger_category: passengerCategory || 'Regular',
-      passenger_count: 1,
-      companions: 0,
+      passenger_name: (passengerName && passengerName.trim()) || `Anonymous Passenger (${cat})`,
+      passenger_category: cat,
+      passenger_count: count,
+      companions: Math.max(0, count - 1),
       registration_source: 'admin',
-      origin_name: origin,
-      destination_name: destination,
-      trip_id: tripId,
+      origin_name: canonicalOrigin,
+      destination_name: canonicalDest,
+      trip_id: tripId || null,
       route_direction: routeDirection || 'Northbound',
-      status: 'planned'
+      status: status || 'boarded'
     };
-    const requiredColumns = new Set(['origin_name', 'destination_name', 'trip_id', 'status']);
+    const requiredColumns = new Set(['origin_name', 'destination_name', 'status']);
 
     // Deployed test databases may lag behind the newest passenger_journeys
     // schema. Manual registration is one passenger, so newer metadata columns

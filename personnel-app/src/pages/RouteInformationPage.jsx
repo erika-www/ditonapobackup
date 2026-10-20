@@ -116,6 +116,7 @@ export function RouteInformationPage() {
   // Manual Registration State
   const [showManualRegistration, setShowManualRegistration] = useState(false);
   const [manualPassengerCategory, setManualPassengerCategory] = useState('Regular');
+  const [manualPassengerCount, setManualPassengerCount] = useState(1);
   const [manualDestination, setManualDestination] = useState('');
   const [manualRegistrationBusy, setManualRegistrationBusy] = useState(false);
   const manualSubmissionRef = useRef(false);
@@ -457,7 +458,7 @@ export function RouteInformationPage() {
     const token = parsed?.tripId || raw.match(/(?:Code|Journey ID|Pass ID):\s*([^\r\n]+)/i)?.[1]?.trim() || raw;
 
     let effectiveTripId = operationalTripId || dutySession?.tripId || null;
-    const found = await fetchJourneyByQrToken(raw);
+    const found = await fetchJourneyByQrToken(raw, currentStop);
 
     if (!found.success || !found.data) {
       setStatusMessage(`Scan alert: ${found.error || 'Pass not recognized.'}`);
@@ -465,8 +466,8 @@ export function RouteInformationPage() {
     }
 
     // Resolve boarding & destination stops against canonical Route 4 stops
-    const resolvedOrigin = resolveRoute4Stop(found.data.origin_name || parsed?.boardingStop) || currentStop || ROUTE4_STOPS[0];
-    const resolvedDestination = resolveRoute4Stop(found.data.destination_name || parsed?.destinationStop) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
+    const resolvedOrigin = resolveRoute4Stop(parsed?.boardingStop || found.data.origin_name) || currentStop || ROUTE4_STOPS[0];
+    const resolvedDestination = resolveRoute4Stop(parsed?.destinationStop || found.data.destination_name) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
 
     const savedTestJourney = passengerRegistry.find((row) => (row.qr_token && row.qr_token === token) || row.id === found.data.id);
     const journey = savedTestJourney ? { ...found.data, ...savedTestJourney } : found.data;
@@ -676,6 +677,80 @@ export function RouteInformationPage() {
     setStatusMessage('Trip paused. Pi 3B Bus Announcer set to standby.');
   };
 
+  const handleAlightCurrentStopPassengers = async () => {
+    const targetCanonical = resolveRoute4Stop(currentStop.name)?.name || currentStop.name;
+    const now = new Date().toISOString();
+
+    const alightingJourneys = passengerRegistry.filter((journey) => {
+      const isCurrentlyBoarded = journey.status === 'boarded';
+      const stopCanonical = resolveRoute4Stop(journey.destination_name)?.name || journey.destination_name;
+      return isCurrentlyBoarded && stopCanonical === targetCanonical;
+    });
+
+    if (alightingJourneys.length === 0) return;
+
+    const totalAlightingPax = alightingJourneys.reduce((sum, j) => sum + (Number(j.count) || 1), 0);
+
+    // Update local state immediately
+    setPassengerRegistry((prev) => {
+      const alightingIds = new Set(alightingJourneys.map((j) => j.id || j.qr_token));
+      const next = prev.map((j) => {
+        if (alightingIds.has(j.id) || (j.qr_token && alightingIds.has(j.qr_token))) {
+          return { ...j, status: 'completed', alighted_at: now };
+        }
+        return j;
+      });
+      try {
+        const plate = dutySession?.plateNumber || 'QC-BUS';
+        const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
+        localStorage.setItem(key, JSON.stringify(next));
+      } catch (_) {}
+      return next;
+    });
+
+    setStatusMessage(`✓ ${totalAlightingPax} passenger${totalAlightingPax === 1 ? '' : 's'} alighted at ${targetCanonical}. Freed seats and updated onboard count.`);
+
+    // Sync in background
+    let activeTripId = operationalTripId || dutySession?.tripId;
+    for (const journey of alightingJourneys) {
+      if (journey.id && !String(journey.id).startsWith('manual-')) {
+        supabase.from('passenger_journeys')
+          .update({ status: 'completed', alighted_at: now })
+          .eq('id', journey.id)
+          .catch(() => {});
+        if (activeTripId) {
+          recordBoardingEvent({
+            tripId: activeTripId,
+            eventType: 'alight',
+            method: 'dashboard',
+            journeyId: journey.id,
+            idempotencyKey: `alight-${journey.id}-${Date.now()}`
+          }).catch(() => {});
+        }
+      }
+    }
+  };
+
+  const handleAlightAllRemainingPassengers = async () => {
+    const now = new Date().toISOString();
+    const onboardJourneys = passengerRegistry.filter((j) => j.status === 'boarded');
+    if (onboardJourneys.length === 0) return;
+
+    const totalPax = onboardJourneys.reduce((sum, j) => sum + (Number(j.count) || 1), 0);
+
+    setPassengerRegistry((prev) => {
+      const next = prev.map((j) => j.status === 'boarded' ? { ...j, status: 'completed', alighted_at: now } : j);
+      try {
+        const plate = dutySession?.plateNumber || 'QC-BUS';
+        const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
+        localStorage.setItem(key, JSON.stringify(next));
+      } catch (_) {}
+      return next;
+    });
+
+    setStatusMessage(`✓ All ${totalPax} remaining passengers alighted at ${currentStop.name}. Trip complete.`);
+  };
+
   const handleManualRegistration = async (event) => {
     event.preventDefault();
     if (!manualDestination || manualSubmissionRef.current) return;
@@ -686,68 +761,107 @@ export function RouteInformationPage() {
     manualSubmissionRef.current = true;
     setManualRegistrationBusy(true);
 
+    const count = Math.max(1, Number(manualPassengerCount) || 1);
     const capacity = busCapacity;
-    if (totalOnboard >= capacity) {
-      setStatusMessage('Passenger registration failed: The bus has no available seats.');
+    if (totalOnboard + count > capacity) {
+      setStatusMessage(`Passenger registration failed: Only ${Math.max(0, capacity - totalOnboard)} available seat${Math.max(0, capacity - totalOnboard) === 1 ? '' : 's'} remaining.`);
       setManualRegistrationBusy(false);
       manualSubmissionRef.current = false;
       return;
     }
-    if ((isPriorityCategory(manualPassengerCategory) ? availablePrioritySeats : availableRegularSeats) <= 0) {
-      setStatusMessage(`Passenger registration failed: No ${isPriorityCategory(manualPassengerCategory) ? 'priority' : 'regular'} seats are available.`);
-      setManualRegistrationBusy(false);
-      manualSubmissionRef.current = false;
-      return;
-    }
-
-    let activeTripId;
-    try {
-      activeTripId = await ensureOperationalTrip();
-    } catch (error) {
-      setStatusMessage(`Passenger registration failed: ${error.message}`);
-      setManualRegistrationBusy(false);
-      manualSubmissionRef.current = false;
-      return;
-    }
-
     const isPri = isPriorityCategory(manualPassengerCategory);
-    const created = await createManualPassengerJourney({
-      passengerName: `Anonymous Passenger (${manualPassengerCategory})`,
-      passengerCategory: manualPassengerCategory,
-      origin: currentStop.name,
-      destination: manualDestination,
-      tripId: activeTripId,
-      routeDirection: direction
-    });
-
-    if (!created.success) {
-      setStatusMessage(`Passenger registration failed: ${created.error}`);
+    const categoryAvailable = isPri ? availablePrioritySeats : availableRegularSeats;
+    if (count > categoryAvailable) {
+      setStatusMessage(`Passenger registration failed: Only ${categoryAvailable} ${isPri ? 'priority' : 'regular'} seat${categoryAvailable === 1 ? '' : 's'} available.`);
       setManualRegistrationBusy(false);
       manualSubmissionRef.current = false;
       return;
     }
 
-    const eventResult = await recordBoardingEvent({
-      tripId: activeTripId,
-      eventType: 'board',
-      method: 'dashboard',
-      journeyId: created.data.id,
-      idempotencyKey: `manual-${created.data.id}`
+    let activeTripId = operationalTripId || dutySession?.tripId || null;
+    if (!activeTripId) {
+      try {
+        activeTripId = await ensureOperationalTrip();
+      } catch (error) {
+        console.warn('Operational trip creation notice:', error.message);
+      }
+    }
+
+    const canonicalOrigin = resolveRoute4Stop(currentStop.name)?.name || currentStop.name;
+    const canonicalDest = resolveRoute4Stop(manualDestination)?.name || manualDestination;
+    const now = new Date().toISOString();
+    const fallbackId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : 'manual-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+
+    // Attempt DB creation
+    let createdJourney = null;
+    try {
+      const created = await createManualPassengerJourney({
+        passengerName: `Anonymous Passenger (${manualPassengerCategory})`,
+        passengerCategory: manualPassengerCategory,
+        origin: canonicalOrigin,
+        destination: canonicalDest,
+        tripId: activeTripId,
+        routeDirection: direction,
+        passengerCount: count,
+        status: 'boarded'
+      });
+      if (created.success && created.data) {
+        createdJourney = created.data;
+      }
+    } catch (err) {
+      console.warn('Database manual journey notice:', err.message);
+    }
+
+    const localJourney = {
+      id: createdJourney?.id || fallbackId,
+      qr_token: createdJourney?.qr_token || fallbackId,
+      trip_id: activeTripId,
+      passenger_name: `Manual Commuter (${manualPassengerCategory})`,
+      passenger_category: manualPassengerCategory,
+      is_priority: isPri,
+      origin_name: canonicalOrigin,
+      destination_name: canonicalDest,
+      count,
+      status: 'boarded',
+      boarded_at: now,
+      registration_source: 'manual_stop_arrival'
+    };
+
+    // Immediately update local passengerRegistry so:
+    // 1. passengersBoardedAt(currentStop.name) increments by count
+    // 2. passengersAlightingAt(manualDestination) increments by count
+    // 3. totalOnboard increments by count
+    // 4. available seats decrement
+    setPassengerRegistry((prev) => {
+      const next = [...prev, localJourney];
+      try {
+        const plate = dutySession?.plateNumber || 'QC-BUS';
+        const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
+        localStorage.setItem(key, JSON.stringify(next));
+      } catch (_) {}
+      return next;
     });
 
-    if (!eventResult.success) {
-      setStatusMessage(`Passenger registered with notice: ${eventResult.error}`);
-    } else {
-      const refreshed = await fetchPassengerRegistry(activeTripId);
-      if (refreshed.success) setPassengerRegistry(refreshed.data);
-      const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - 1) : availablePrioritySeats;
-      const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - 1) : availableRegularSeats;
-      const stopTotal = passengersBoardedAt(currentStop.name) + 1;
-      setStatusMessage(
-        `✓ Passenger boarded at ${currentStop.name}. Stop total: ${stopTotal}. Decremented ${isPri ? `Priority Seats (${remainingPriority}/${prioritySeatCapacity})` : `Regular Seats (${remainingRegular}/${regularSeatCapacity})`}. Destination: ${manualDestination}.`
-      );
-      setShowManualRegistration(false);
+    // Record boarding event in background if online
+    if (activeTripId && createdJourney?.id) {
+      recordBoardingEvent({
+        tripId: activeTripId,
+        eventType: 'board',
+        method: 'dashboard',
+        journeyId: createdJourney.id,
+        idempotencyKey: `manual-${createdJourney.id}`
+      }).catch((e) => console.warn('Record boarding event notice:', e.message));
     }
+
+    const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - count) : availablePrioritySeats;
+    const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - count) : availableRegularSeats;
+    const stopTotal = passengersBoardedAt(canonicalOrigin) + count;
+    setStatusMessage(
+      `✓ ${count} passenger${count === 1 ? '' : 's'} boarded at ${canonicalOrigin}. Stop total boarded: ${stopTotal}. Destination: ${canonicalDest} (will alight at Stop ${stopsList.findIndex(s => s.name === canonicalDest) + 1}). Seats: ${remainingPriority} Priority / ${remainingRegular} Regular.`
+    );
+    setShowManualRegistration(false);
     setManualRegistrationBusy(false);
     manualSubmissionRef.current = false;
   };
@@ -914,78 +1028,134 @@ export function RouteInformationPage() {
         </div>
       )}
 
-      {/* MANUAL PASSENGER REGISTRATION MODAL */}
+      {/* MANUAL PASSENGER REGISTRATION & STOP ARRIVAL MODAL */}
       {showManualRegistration && (
         <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.78)', display: 'grid', placeItems: 'center', zIndex: 1500, padding: '1rem' }}>
-          <form className="card" onSubmit={handleManualRegistration} style={{ width: 'min(500px, 100%)', padding: '1.5rem', border: currentStopIndex === stopsList.length - 1 ? '2px solid #f59e0b' : '2px solid #06b6d4', boxShadow: '0 20px 40px rgba(0,0,0,0.6)' }}>
+          <div className="card" style={{ width: 'min(520px, 100%)', padding: '1.5rem', border: currentStopIndex === stopsList.length - 1 ? '2px solid #f59e0b' : '2px solid #06b6d4', boxShadow: '0 20px 40px rgba(0,0,0,0.6)', maxHeight: '90vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.65rem' }}>
               <span className={`badge ${currentStopIndex === stopsList.length - 1 ? 'badge-warning' : 'badge-success'}`} style={{ fontSize: '0.75rem', fontWeight: 800 }}>
-                {currentStopIndex === stopsList.length - 1 ? '🏁 TARGET DESTINATION REACHED (STOP 15 OF 15)' : `📍 BUS AT STOP ${currentStopIndex + 1} OF 15 (WITHIN 5M)`}
+                {currentStopIndex === stopsList.length - 1 ? '🏁 TARGET DESTINATION REACHED (STOP 15 OF 15)' : `📍 BUS AT STOP ${currentStopIndex + 1} OF 15`}
               </span>
               <button type="button" onClick={() => setShowManualRegistration(false)} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '1.25rem', padding: '0 0.25rem' }}>×</button>
             </div>
             <h2 style={{ fontSize: '1.25rem', marginTop: 0, marginBottom: '0.25rem', color: 'var(--text-main)' }}>
-              {currentStopIndex === stopsList.length - 1 ? '🏁 Final Terminal Reached' : 'Manual Passenger Registration'}
+              {currentStopIndex === stopsList.length - 1 ? '🏁 Final Terminal Arrival' : `Stop ${currentStopIndex + 1}: Passenger Registry`}
             </h2>
             <p style={{ color: '#94a3b8', fontSize: '0.85rem', marginBottom: '1rem', lineHeight: '1.4' }}>
               {currentStopIndex === stopsList.length - 1 ? (
-                <span style={{ color: '#fbbf24', fontWeight: 700 }}>Bus has arrived at target destination terminal within 5m radius: <strong>{currentStop.name}</strong></span>
+                <span style={{ color: '#fbbf24', fontWeight: 700 }}>Bus has arrived at target destination terminal: <strong>{currentStop.name}</strong></span>
               ) : (
-                <span>Bus detected within 5m radius at Stop {currentStopIndex + 1}: <strong style={{ color: '#38bdf8' }}>{currentStop.name}</strong></span>
+                <span>Bus at Stop {currentStopIndex + 1}: <strong style={{ color: '#38bdf8' }}>{currentStop.name}</strong></span>
               )}
             </p>
 
-            <div style={{ padding: '.65rem .8rem', marginBottom: '.75rem', borderRadius: '8px', backgroundColor: 'rgba(6, 182, 212, .12)', border: '1px solid #0891b2', color: '#67e8f9', fontWeight: 800 }}>
-              Already boarded at this stop: {passengersBoardedAt(currentStop.name)}
-            </div>
+            {/* ALIGHTING PASSENGERS AT THIS STOP */}
+            {(passengersAlightingAt(currentStop.name) > 0 || (currentStopIndex === stopsList.length - 1 && totalOnboard > 0)) && (
+              <div style={{ padding: '.75rem .9rem', marginBottom: '1rem', borderRadius: '8px', backgroundColor: 'rgba(239, 68, 68, .12)', border: '1px solid #ef4444' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.5rem' }}>
+                  <span style={{ color: '#f87171', fontWeight: 800, fontSize: '.9rem' }}>
+                    ↓ Alighting at this Stop: {currentStopIndex === stopsList.length - 1 ? totalOnboard : passengersAlightingAt(currentStop.name)} pax
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={currentStopIndex === stopsList.length - 1 ? handleAlightAllRemainingPassengers : handleAlightCurrentStopPassengers}
+                  style={{ width: '100%', backgroundColor: '#ef4444', color: '#ffffff', fontWeight: 700, padding: '0.55rem', borderRadius: '6px', border: 'none', cursor: 'pointer' }}
+                >
+                  ✓ Confirm Alighting ({currentStopIndex === stopsList.length - 1 ? totalOnboard : passengersAlightingAt(currentStop.name)} pax)
+                </button>
+              </div>
+            )}
 
-            <label className="form-label" htmlFor="manual-passenger-category" style={{ marginTop: '.75rem' }}>
-              Passenger Category (Determines /20 Priority vs /30 Regular Seating)
-            </label>
-            <select
-              id="manual-passenger-category"
-              className="form-select"
-              value={manualPassengerCategory}
-              onChange={(e) => setManualPassengerCategory(e.target.value)}
-            >
-              <option value="Regular">Regular Passenger (Non-Priority Seat /30)</option>
-              <option value="Student">Student (Non-Priority Seat /30)</option>
-              <option value="Senior Citizen">Senior Citizen (Priority Seat /20)</option>
-              <option value="PWD">PWD - Person with Disability (Priority Seat /20)</option>
-              <option value="Pregnant">Pregnant Passenger (Priority Seat /20)</option>
-            </select>
+            {passengersCompletedAlightedAt(currentStop.name) > 0 && (
+              <div style={{ padding: '.45rem .75rem', marginBottom: '.75rem', borderRadius: '6px', backgroundColor: 'rgba(148, 163, 184, .1)', border: '1px solid #64748b', color: '#94a3b8', fontSize: '.78rem' }}>
+                ✓ {passengersCompletedAlightedAt(currentStop.name)} passenger(s) have already alighted at this stop.
+              </div>
+            )}
 
-            <label className="form-label" htmlFor="manual-passenger-destination" style={{ marginTop: '.75rem' }}>
-              Destination Stop
-            </label>
-            <select
-              id="manual-passenger-destination"
-              className="form-select"
-              value={manualDestination}
-              onChange={(e) => setManualDestination(e.target.value)}
-              required
-            >
-              <option value="">Select destination (Stops {currentStopIndex + 2} to 15)</option>
-              {stopsList.slice(currentStopIndex + 1).map((stop, sIdx) => (
-                <option key={stop.id || sIdx} value={stop.name}>
-                  Stop {currentStopIndex + 2 + sIdx}: {stop.name}
-                </option>
-              ))}
-            </select>
+            {/* BOARDING SECTION (NOT TERMINAL STOP) */}
+            {currentStopIndex < stopsList.length - 1 ? (
+              <form onSubmit={handleManualRegistration}>
+                <div style={{ padding: '.65rem .8rem', marginBottom: '.75rem', borderRadius: '8px', backgroundColor: 'rgba(6, 182, 212, .12)', border: '1px solid #0891b2', color: '#67e8f9', fontWeight: 800, display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Already boarded at this stop:</span>
+                  <span style={{ fontSize: '1rem' }}>{passengersBoardedAt(currentStop.name)} pax</span>
+                </div>
 
-            <div style={{ display: 'flex', gap: '.6rem', marginTop: '1.25rem' }}>
-              <button type="button" className="btn btn-secondary" onClick={() => setShowManualRegistration(false)}>Close / Skip</button>
-              <button
-                type="submit"
-                className="btn btn-primary"
-                style={{ flex: 1, backgroundColor: '#06b6d4', borderColor: '#06b6d4' }}
-                disabled={manualRegistrationBusy || !isTripActive || !operationalTripId || !manualDestination}
-              >
-                {manualRegistrationBusy ? 'Registering…' : 'Confirm & Board Passenger'}
-              </button>
-            </div>
-            {!operationalTripId && <p role="alert" style={{ color: '#f87171', marginTop: '0.75rem', fontSize: '0.8rem', marginBottom: 0 }}>Notice: Trip session in offline/standby mode.</p>}
-          </form>
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '.6rem', marginTop: '.75rem' }}>
+                  <div>
+                    <label className="form-label" htmlFor="manual-passenger-category">
+                      Passenger Category
+                    </label>
+                    <select
+                      id="manual-passenger-category"
+                      className="form-select"
+                      value={manualPassengerCategory}
+                      onChange={(e) => setManualPassengerCategory(e.target.value)}
+                    >
+                      <option value="Regular">Regular Passenger (Non-Priority /30)</option>
+                      <option value="Student">Student (Non-Priority /30)</option>
+                      <option value="Senior Citizen">Senior Citizen (Priority /20)</option>
+                      <option value="PWD">PWD - Person with Disability (Priority /20)</option>
+                      <option value="Pregnant">Pregnant Passenger (Priority /20)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="form-label" htmlFor="manual-passenger-count">
+                      Pax Count
+                    </label>
+                    <input
+                      id="manual-passenger-count"
+                      type="number"
+                      min="1"
+                      max="20"
+                      className="form-control"
+                      value={manualPassengerCount}
+                      onChange={(e) => setManualPassengerCount(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                      style={{ textAlign: 'center', fontWeight: 700 }}
+                    />
+                  </div>
+                </div>
+
+                <label className="form-label" htmlFor="manual-passenger-destination" style={{ marginTop: '.75rem' }}>
+                  Destination Stop
+                </label>
+                <select
+                  id="manual-passenger-destination"
+                  className="form-select"
+                  value={manualDestination}
+                  onChange={(e) => setManualDestination(e.target.value)}
+                  required
+                >
+                  <option value="">Select destination (Stops {currentStopIndex + 2} to 15)</option>
+                  {stopsList.slice(currentStopIndex + 1).map((stop, sIdx) => (
+                    <option key={stop.id || sIdx} value={stop.name}>
+                      Stop {currentStopIndex + 2 + sIdx}: {stop.name}
+                    </option>
+                  ))}
+                </select>
+
+                <div style={{ display: 'flex', gap: '.6rem', marginTop: '1.25rem' }}>
+                  <button type="button" className="btn btn-secondary" onClick={() => setShowManualRegistration(false)}>Close / Skip</button>
+                  <button
+                    type="submit"
+                    className="btn btn-primary"
+                    style={{ flex: 1, backgroundColor: '#06b6d4', borderColor: '#06b6d4', fontWeight: 700 }}
+                    disabled={manualRegistrationBusy || !isTripActive || !manualDestination}
+                  >
+                    {manualRegistrationBusy ? 'Registering…' : `Confirm & Board ${manualPassengerCount} Passenger${manualPassengerCount > 1 ? 's' : ''}`}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div style={{ marginTop: '1rem', textAlign: 'center' }}>
+                <p style={{ color: '#fbbf24', fontSize: '.9rem' }}>This is the final stop of the route. No new boardings allowed.</p>
+                <button type="button" className="btn btn-secondary" onClick={() => setShowManualRegistration(false)} style={{ width: '100%', marginTop: '.5rem' }}>
+                  Close
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

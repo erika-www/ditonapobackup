@@ -144,8 +144,8 @@ export function PassengerCheckInPage() {
     const passengerCount = Math.max(1, Number(journey.count || journey.passenger_count) || 1);
 
     // Resolve boarding and destination stops against canonical Route 4 stops
-    const resolvedOrigin = resolveRoute4Stop(journey.origin_name) || ROUTE4_STOPS[0];
-    const resolvedDestination = resolveRoute4Stop(journey.destination_name) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
+    const resolvedOrigin = resolveRoute4Stop(journey.parsed?.boardingStop || journey.origin_name) || ROUTE4_STOPS[0];
+    const resolvedDestination = resolveRoute4Stop(journey.parsed?.destinationStop || journey.destination_name) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
 
     const result = await recordBoardingEvent({
       tripId: effectiveTripId,
