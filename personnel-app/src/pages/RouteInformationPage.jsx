@@ -83,7 +83,7 @@ export function RouteInformationPage() {
 
   useEffect(() => {
     const orderedStops = applyRoute4CoordinateOverrides(
-      direction === 'Southbound' ? routeStops.filter((stop) => stop.id !== 'stop-9').reverse() : routeStops,
+      direction === 'Southbound' ? [...routeStops].reverse() : routeStops,
       direction
     );
     setStopsList(orderedStops.slice(0, 15).map((stop, idx) => ({
@@ -488,8 +488,8 @@ export function RouteInformationPage() {
     }
 
     // Resolve boarding & destination stops against canonical Route 4 stops
-    const resolvedOrigin = resolveRoute4Stop(parsed?.boardingStop || found.data.origin_name) || currentStop || stopsList[0];
-    const resolvedDestination = resolveRoute4Stop(parsed?.destinationStop || found.data.destination_name) || stopsList[stopsList.length - 1];
+    const resolvedOrigin = resolveRoute4Stop(parsed?.boardingStop || found.data.origin_name, direction) || resolveRoute4Stop(currentStop, direction) || stopsList[0];
+    const resolvedDestination = resolveRoute4Stop(parsed?.destinationStop || found.data.destination_name, direction) || stopsList[stopsList.length - 1];
 
     // DIRECTION VALIDATION (Northbound vs Southbound)
     const passengerDir = parsed?.direction || found.data.route_direction || found.data.direction;
@@ -570,6 +570,17 @@ export function RouteInformationPage() {
           if (journey.id) {
             localStorage.setItem(`qcbus_scanned_${journey.id}`, JSON.stringify({ status: updatedJourney.status, scanned_at: now }));
           }
+          // Shared cookie for cross-port localhost sync (passenger-app port 5173 <-> personnel-app port 5174)
+          const cookiePayload = encodeURIComponent(JSON.stringify({
+            status: updatedJourney.status,
+            stop: resolvedOrigin.name,
+            time: Date.now()
+          }));
+          document.cookie = `qcbus_scan_${token}=${cookiePayload}; path=/; max-age=86400`;
+          if (journey.id) {
+            document.cookie = `qcbus_scan_${journey.id}=${cookiePayload}; path=/; max-age=86400`;
+          }
+
           const liveOcc = {
             bus_plate: dutySession?.plateNumber || 'QC-BUS',
             trip_id: effectiveTripId,
@@ -589,6 +600,16 @@ export function RouteInformationPage() {
         } catch (_) {}
         return nextRows;
       });
+
+      // Background update to Supabase passenger_journeys table so database stays updated even in test mode
+      try {
+        supabase.from('passenger_journeys').update({
+          status: updatedJourney.status,
+          boarded_at: updatedJourney.boarded_at,
+          alighted_at: updatedJourney.alighted_at,
+          updated_at: now
+        }).or(`qr_token.eq."${token}",id.eq."${token}"`).then(() => {}).catch(() => {});
+      } catch (_) {}
 
       setStatusMessage(nextEventType === 'board'
         ? `✓ ${count} passenger${count === 1 ? '' : 's'} boarded (${cat}). Total Onboard: ${totalOnboard + count}/${capacity}. Boarded at: ${resolvedOrigin.name} → Destination: ${resolvedDestination.name}.`
@@ -635,6 +656,17 @@ export function RouteInformationPage() {
         if (journey.id) {
           localStorage.setItem(`qcbus_scanned_${journey.id}`, JSON.stringify({ status: updatedJourney.status, scanned_at: now }));
         }
+        // Shared cookie for cross-port localhost sync (passenger-app port 5173 <-> personnel-app port 5174)
+        const cookiePayload = encodeURIComponent(JSON.stringify({
+          status: updatedJourney.status,
+          stop: resolvedOrigin.name,
+          time: Date.now()
+        }));
+        document.cookie = `qcbus_scan_${token}=${cookiePayload}; path=/; max-age=86400`;
+        if (journey.id) {
+          document.cookie = `qcbus_scan_${journey.id}=${cookiePayload}; path=/; max-age=86400`;
+        }
+
         const liveOcc = {
           bus_plate: plate,
           trip_id: effectiveTripId,
@@ -672,26 +704,19 @@ export function RouteInformationPage() {
     // Direct update to Supabase passenger_journeys table
     try {
       const isUuid = (str) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(str || ''));
+      const updateData = {
+        status: updatedJourney.status,
+        trip_id: effectiveTripId,
+        origin_name: resolvedOrigin.name,
+        destination_name: resolvedDestination.name,
+        boarded_at: updatedJourney.boarded_at,
+        alighted_at: updatedJourney.alighted_at,
+        updated_at: now
+      };
       if (journey.id && isUuid(journey.id)) {
-        supabase.from('passenger_journeys').update({
-          status: updatedJourney.status,
-          trip_id: effectiveTripId,
-          origin_name: resolvedOrigin.name,
-          destination_name: resolvedDestination.name,
-          boarded_at: updatedJourney.boarded_at,
-          alighted_at: updatedJourney.alighted_at,
-          updated_at: now
-        }).eq('id', journey.id).catch(() => {});
+        supabase.from('passenger_journeys').update(updateData).or(`id.eq."${journey.id}",qr_token.eq."${token}"`).catch(() => {});
       } else if (token) {
-        supabase.from('passenger_journeys').update({
-          status: updatedJourney.status,
-          trip_id: effectiveTripId,
-          origin_name: resolvedOrigin.name,
-          destination_name: resolvedDestination.name,
-          boarded_at: updatedJourney.boarded_at,
-          alighted_at: updatedJourney.alighted_at,
-          updated_at: now
-        }).eq('qr_token', token).catch(() => {});
+        supabase.from('passenger_journeys').update(updateData).eq('qr_token', token).catch(() => {});
       }
     } catch (_) {}
 
@@ -701,6 +726,7 @@ export function RouteInformationPage() {
       method: 'qr',
       passengerId: journey.passenger_id || null,
       journeyId: journey.id,
+      busId: dutySession?.busId || null,
       idempotencyKey: `qr-${journey.id}-${nextEventType}-${Date.now()}`
     });
 

@@ -252,6 +252,9 @@ export function StartTripInterface({
   const [occupancy, setOccupancy] = useState(null);
 
   const qrCanvasRef = useRef(null);
+  const handleCompleteJourneyRef = useRef(null);
+  const activeTripRef = useRef(activeTrip);
+  useEffect(() => { activeTripRef.current = activeTrip; }, [activeTrip]);
   const [tripHistory, setTripHistory] = useState(() => {
     try {
       const saved = localStorage.getItem(`qcbus_local_trips_${currentUser?.id || 'guest'}`);
@@ -553,17 +556,19 @@ export function StartTripInterface({
     return () => clearInterval(timer);
   }, [activeTab, activeTrip, liveBusCoords?.updated_at]);
 
-  // Live Detection: When personnel scans passenger QR code, mark journey Ongoing and remove Cancel Trip button
+  // Live Detection: When personnel scans passenger QR code, mark journey Ongoing, toast notification, and auto-complete on second scan
   useEffect(() => {
     if (!activeTrip || activeTrip.status === 'Completed' || activeTrip.status === 'Cancelled') return;
 
     const token = activeTrip.id || activeTrip.dailyTripId;
     const dbId = activeTrip.dbId;
 
-    const markAsOngoing = () => {
+    const markAsOngoing = (overrideStopName = null) => {
       setActiveTrip((prev) => {
         if (!prev) return null;
         if (prev.isQrScanned && prev.status === 'Ongoing') return prev;
+        const startStopName = overrideStopName || prev.fromStop?.name || prev.fromStop || prev.origin_name || 'starting stop';
+        onShowToast?.(`You have boarded the bus at ${startStopName}`);
         return {
           ...prev,
           status: 'Ongoing',
@@ -578,59 +583,76 @@ export function StartTripInterface({
       }));
     };
 
-    const checkLocalScanned = () => {
+    const checkStatus = (status, stopName) => {
+      const norm = String(status || '').toLowerCase();
+      if (norm === 'boarded' || norm === 'ongoing') {
+        markAsOngoing(stopName);
+        return true;
+      } else if (norm === 'completed') {
+        if (handleCompleteJourneyRef.current) {
+          handleCompleteJourneyRef.current();
+        }
+        return true;
+      }
+      return false;
+    };
+
+    const getSharedCookie = (name) => {
+      if (typeof document === 'undefined') return null;
       try {
-        if (token) {
-          const item = localStorage.getItem(`qcbus_scanned_${token}`);
-          if (item) {
-            const parsed = JSON.parse(item);
-            if (parsed.status === 'boarded' || parsed.status === 'Ongoing' || parsed.status === 'ongoing') {
-              markAsOngoing();
-              return true;
-            }
+        const match = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]+)'));
+        return match ? decodeURIComponent(match[1]) : null;
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const checkLocalAndCookieScanned = () => {
+      try {
+        // 1. Shared cookie check across localhost ports (5173 & 5174)
+        const cookieKeys = [token ? `qcbus_scan_${token}` : null, dbId ? `qcbus_scan_${dbId}` : null].filter(Boolean);
+        for (const cKey of cookieKeys) {
+          const val = getSharedCookie(cKey);
+          if (val) {
+            const parsed = JSON.parse(val);
+            if (parsed && checkStatus(parsed.status, parsed.stop)) return true;
           }
         }
-        if (dbId) {
-          const item = localStorage.getItem(`qcbus_scanned_${dbId}`);
+
+        // 2. Local storage check
+        const storageKeys = [token ? `qcbus_scanned_${token}` : null, dbId ? `qcbus_scanned_${dbId}` : null].filter(Boolean);
+        for (const sKey of storageKeys) {
+          const item = localStorage.getItem(sKey);
           if (item) {
             const parsed = JSON.parse(item);
-            if (parsed.status === 'boarded' || parsed.status === 'Ongoing' || parsed.status === 'ongoing') {
-              markAsOngoing();
-              return true;
-            }
+            if (parsed && checkStatus(parsed.status, parsed.stop)) return true;
           }
         }
       } catch (_) {}
       return false;
     };
 
-    if (checkLocalScanned()) return;
+    if (checkLocalAndCookieScanned()) return;
 
     const interval = setInterval(async () => {
-      if (checkLocalScanned()) return;
+      if (checkLocalAndCookieScanned()) return;
       if (dbId || token) {
         const res = await fetchJourneyStatus(dbId || token);
         if (res.success && res.data) {
-          if (res.data.status === 'boarded' || res.data.status === 'ongoing') {
-            markAsOngoing();
-          } else if (res.data.status === 'completed') {
-            setActiveTrip((prev) => prev ? { ...prev, status: 'Completed', isQrScanned: true } : null);
-          }
+          checkStatus(res.data.status, res.data.origin_name);
         }
       }
-    }, 2000);
+    }, 1000);
 
     const unsubscribe = subscribeToPassengerJourney(dbId || token, (updatedRow) => {
-      if (updatedRow.status === 'boarded' || updatedRow.status === 'ongoing') {
-        markAsOngoing();
-      } else if (updatedRow.status === 'completed') {
-        setActiveTrip((prev) => prev ? { ...prev, status: 'Completed', isQrScanned: true } : null);
+      if (updatedRow) {
+        checkStatus(updatedRow.status, updatedRow.origin_name);
       }
     });
 
     const onStorage = (e) => {
       if (e.key === `qcbus_scanned_${token}` || (dbId && e.key === `qcbus_scanned_${dbId}`)) {
-        checkLocalScanned();
+        checkLocalAndCookieScanned();
       }
     };
     window.addEventListener('storage', onStorage);
@@ -640,7 +662,7 @@ export function StartTripInterface({
       unsubscribe();
       window.removeEventListener('storage', onStorage);
     };
-  }, [activeTrip?.id, activeTrip?.dbId, activeTrip?.isQrScanned, activeTrip?.status]);
+  }, [activeTrip?.id, activeTrip?.dbId, activeTrip?.isQrScanned, activeTrip?.status, onShowToast]);
 
   const handleRouteChange = (routeId) => {
     const selected = QC_ROUTES.find(r => r.id === routeId) || QC_ROUTES[0];
@@ -744,14 +766,17 @@ export function StartTripInterface({
       // Generate unique trip ID per passenger per day strictly formatted as MMDDYY-xxxxx
       const dailyTripId = generateDailyTripId();
 
+      const originName = startStop.canonicalDbName || startStop.name;
+      const destName = endStop.canonicalDbName || endStop.name;
+
       // Standard scannable JSON QR payload matching selected details
       const qrPayloadString = createPassengerQrPayload({
         tripId: dailyTripId,
         count: totalPassengerCount,
         companions: companionNumber,
         category,
-        boardingStop: startStop.name,
-        destinationStop: endStop.name,
+        boardingStop: originName,
+        destinationStop: destName,
         busPlate: bus.plateNumber,
         direction,
         companionsList: cleanCompanionsList
@@ -759,10 +784,10 @@ export function StartTripInterface({
 
       // Save journey to Supabase passenger_journeys table
       const res = await savePassengerJourney({
-        origin_name: startStop.name,
+        origin_name: originName,
         origin_lat: startStop.lat || null,
         origin_lng: startStop.lng || null,
-        destination_name: endStop.name,
+        destination_name: destName,
         destination_lat: endStop.lat || null,
         destination_lng: endStop.lng || null,
         qr_token: dailyTripId,
@@ -855,26 +880,29 @@ export function StartTripInterface({
   };
 
   const handleCompleteJourney = async () => {
-    if (!activeTrip) return;
-    if (activeTrip.dbId) {
-      const res = await updateJourneyStatus(activeTrip.dbId, 'completed');
-      if (!res.success) {
-        if (onShowToast) onShowToast(`Error completing trip: ${res.error}`);
-        return;
+    const currentTrip = activeTripRef.current || activeTrip;
+    if (!currentTrip) return;
+    if (currentTrip.dbId) {
+      try {
+        await updateJourneyStatus(currentTrip.dbId, 'completed');
+      } catch (err) {
+        console.warn('Update journey status error:', err);
       }
     }
-    if (activeTrip.localTest && localActiveJourneyKey) localStorage.removeItem(localActiveJourneyKey);
+    if (currentTrip.localTest && localActiveJourneyKey) localStorage.removeItem(localActiveJourneyKey);
+    const fromName = currentTrip.fromStop?.name || currentTrip.fromStop || 'Origin';
+    const toName = currentTrip.toStop?.name || currentTrip.toStop || 'Destination';
     const completedHistoryItem = {
-      id: activeTrip.id,
-      dbId: activeTrip.dbId,
+      id: currentTrip.id,
+      dbId: currentTrip.dbId,
       date: new Date().toLocaleDateString(),
-      fromStop: activeTrip.fromStop.name || activeTrip.fromStop,
-      toStop: activeTrip.toStop.name || activeTrip.toStop,
-      routeName: activeTrip.route?.name || 'QC Bus Route 4',
-      busPlate: activeTrip.bus?.plateNumber || routeBusTrip?.bus?.plate_number || '',
-      companions: activeTrip.companions || 0,
-      totalPassengers: activeTrip.totalPassengers || 1,
-      category: activeTrip.category || 'Regular',
+      fromStop: fromName,
+      toStop: toName,
+      routeName: currentTrip.route?.name || 'QC Bus Route 4',
+      busPlate: currentTrip.bus?.plateNumber || routeBusTrip?.bus?.plate_number || '',
+      companions: currentTrip.companions || 0,
+      totalPassengers: currentTrip.totalPassengers || 1,
+      category: currentTrip.category || 'Regular',
       status: 'Completed'
     };
     setTripHistory((rows) => {
@@ -888,13 +916,14 @@ export function StartTripInterface({
       } catch {}
       return nextRows;
     });
-    if (!activeTrip.localTest) setFeedbackTrip(activeTrip);
+    if (!currentTrip.localTest) setFeedbackTrip(currentTrip);
     setActiveTrip(null);
     setStep('form');
     setDestinationReachedModalOpen(false);
     await recallUserPastActions();
     if (onShowToast) onShowToast('Trip completed safely!');
   };
+  handleCompleteJourneyRef.current = handleCompleteJourney;
 
   const handleCancelJourney = async () => {
     if (!activeTrip) return;

@@ -4,7 +4,7 @@
  */
 import { createClient } from '@supabase/supabase-js';
 import { isPriorityCategory } from '@shared/qrPassUtils';
-import { ROUTE4_STOPS } from '@shared/route4Stops';
+import { ROUTE4_STOPS, resolveRoute4Stop } from '@shared/route4Stops';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -202,23 +202,32 @@ export async function savePassengerJourney(journeyData) {
       return { success: false, error: userErr?.message || 'Sign in before creating a journey.' };
     }
 
+    const direction = journeyData.route_direction || journeyData.direction || 'Northbound';
+    const normDir = String(direction).toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
+    const resolvedOrigin = resolveRoute4Stop(journeyData.origin_name, normDir);
+    const resolvedDest = resolveRoute4Stop(journeyData.destination_name, normDir);
+    const originName = resolvedOrigin ? (resolvedOrigin.canonicalDbName || resolvedOrigin.name) : journeyData.origin_name;
+    const destName = resolvedDest ? (resolvedDest.canonicalDbName || resolvedDest.name) : journeyData.destination_name;
+
     const payload = {
       passenger_id: userId || null,
       qr_token: journeyData.qr_token || null,
-      passenger_name: journeyData.passenger_name || null,
-      passenger_category: journeyData.passenger_category || null,
+      passenger_name: journeyData.passenger_name || 'Passenger',
+      passenger_category: journeyData.passenger_category || 'Regular',
       passenger_count: Math.max(1, Number(journeyData.passenger_count) || 1),
-      companions: Math.max(0, Number(journeyData.companions) || 0),
       registration_source: 'app',
       trip_id: journeyData.trip_id || null,
-      origin_name: journeyData.origin_name,
-      origin_lat: journeyData.origin_lat || null,
-      destination_name: journeyData.destination_name,
-      destination_lat: journeyData.destination_lat || null,
-      destination_lng: journeyData.destination_lng || null,
-      route_direction: journeyData.route_direction || journeyData.direction || 'Northbound',
+      origin_name: originName,
+      origin_lat: journeyData.origin_lat || resolvedOrigin?.lat || null,
+      destination_name: destName,
+      destination_lat: journeyData.destination_lat || resolvedDest?.lat || null,
+      destination_lng: journeyData.destination_lng || resolvedDest?.lng || null,
+      route_direction: normDir,
       status: 'planned'
     };
+    if (journeyData.companions != null) {
+      payload.companions = Math.max(0, Number(journeyData.companions) || 0);
+    }
 
     let data = null;
     let error = null;
@@ -366,6 +375,32 @@ export async function fetchUserJourneys(passengerId) {
 export async function fetchJourneyStatus(journeyIdOrToken) {
   try {
     if (!journeyIdOrToken) return { success: false, error: 'No ID or token provided' };
+
+    // 1. Check shared cookie for instant cross-port detection
+    if (typeof document !== 'undefined') {
+      try {
+        const getCookie = (name) => {
+          const match = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]+)'));
+          return match ? decodeURIComponent(match[1]) : null;
+        };
+        const cVal = getCookie(`qcbus_scan_${journeyIdOrToken}`);
+        if (cVal) {
+          const parsed = JSON.parse(cVal);
+          if (parsed && parsed.status) {
+            return {
+              success: true,
+              data: {
+                qr_token: journeyIdOrToken,
+                status: parsed.status,
+                ...parsed
+              }
+            };
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 2. Query Supabase
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(journeyIdOrToken));
     let query = supabase.from('passenger_journeys').select('*');
     if (isUuid) {

@@ -103,11 +103,13 @@ export async function recordBoardingEvent({
   method = 'qr',
   passengerId = null,
   journeyId = null,
-  idempotencyKey = null
+  idempotencyKey = null,
+  busId = null
 }) {
   const isUuid = (str) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(str || ''));
   const safeJourneyId = isUuid(journeyId) ? journeyId : null;
   const safeTripId = isUuid(tripId) ? tripId : null;
+  const safeBusId = isUuid(busId) ? busId : null;
 
   // 1. Try RPC record_boarding_event first if tripId is a valid UUID
   if (safeTripId) {
@@ -146,6 +148,7 @@ export async function recordBoardingEvent({
       event_type: eventType,
       method: method || 'qr',
       trip_id: safeTripId || null,
+      bus_id: safeBusId || null,
       journey_id: safeJourneyId || null,
       passenger_id: isUuid(passengerId) ? passengerId : null,
       idempotency_key: idempotencyKey || `event-${Date.now()}-${Math.random()}`,
@@ -771,7 +774,7 @@ export async function fetchPassengerRegistry(tripId) {
   }
 }
 
-export async function fetchJourneyByQrToken(rawToken, currentStop = null) {
+export async function fetchJourneyByQrToken(rawToken, currentStop = null, direction = null) {
   try {
     const parsed = parsePassengerQRCode(rawToken);
     const searchToken = parsed?.tripId || (typeof rawToken === 'string' ? rawToken.trim() : '');
@@ -781,7 +784,7 @@ export async function fetchJourneyByQrToken(rawToken, currentStop = null) {
     if (searchToken) {
       try {
         const journeyQuery = supabase.from('passenger_journeys')
-          .select('id,qr_token,trip_id,passenger_id,status,passenger_name,passenger_category,passenger_count,companions,origin_name,destination_name,created_at,profiles:profiles(full_name,passenger_category)');
+          .select('id,qr_token,trip_id,passenger_id,status,passenger_name,passenger_category,passenger_count,companions,origin_name,destination_name,route_direction,created_at,profiles:profiles(full_name,passenger_category)');
         const queryRes = isUuid
           ? await journeyQuery.or(`qr_token.eq."${searchToken}",id.eq."${searchToken}"`).maybeSingle()
           : await journeyQuery.eq('qr_token', searchToken).maybeSingle();
@@ -793,13 +796,15 @@ export async function fetchJourneyByQrToken(rawToken, currentStop = null) {
       }
     }
 
+    const effectiveDir = direction || parsed?.direction || data?.route_direction || 'Northbound';
+
     // Resolve boarding & destination stops against canonical Route 4 stops
     // Prefer explicit stop from QR, then database record, then current bus stop
     const rawOrigin = parsed?.boardingStop || data?.origin_name || (currentStop ? (currentStop.name || currentStop) : null);
-    const resolvedOrigin = resolveRoute4Stop(rawOrigin) || (currentStop ? resolveRoute4Stop(currentStop) : null) || ROUTE4_STOPS[0];
+    const resolvedOrigin = resolveRoute4Stop(rawOrigin, effectiveDir) || (currentStop ? resolveRoute4Stop(currentStop, effectiveDir) : null) || ROUTE4_STOPS[0];
 
     const rawDest = parsed?.destinationStop || data?.destination_name;
-    const resolvedDestination = resolveRoute4Stop(rawDest) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
+    const resolvedDestination = resolveRoute4Stop(rawDest, effectiveDir) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
 
     if (data) {
       const cat = data.passenger_category || parsed?.category || data.profiles?.passenger_category || 'Regular';
@@ -811,6 +816,7 @@ export async function fetchJourneyByQrToken(rawToken, currentStop = null) {
           is_priority: isPriorityCategory(cat),
           origin_name: resolvedOrigin.name,
           destination_name: resolvedDestination.name,
+          route_direction: data.route_direction || effectiveDir,
           count: Math.max(1, Number(parsed?.count || data.passenger_count) || 1),
           parsed
         }
@@ -835,6 +841,7 @@ export async function fetchJourneyByQrToken(rawToken, currentStop = null) {
         is_priority: isPriorityCategory(cat),
         origin_name: resolvedOrigin.name,
         destination_name: resolvedDestination.name,
+        route_direction: effectiveDir,
         count: Math.max(1, Number(parsed.count) || 1),
         created_at: new Date().toISOString(),
         parsed
@@ -848,8 +855,9 @@ export async function fetchJourneyByQrToken(rawToken, currentStop = null) {
           passenger_name: syntheticJourney.passenger_name,
           passenger_category: cat,
           passenger_count: syntheticJourney.count,
-          origin_name: resolvedOrigin.name,
-          destination_name: resolvedDestination.name,
+          origin_name: resolvedOrigin.canonicalDbName || resolvedOrigin.name,
+          destination_name: resolvedDestination.canonicalDbName || resolvedDestination.name,
+          route_direction: effectiveDir,
           status: 'planned',
           registration_source: 'qr_scan'
         }]).select().maybeSingle();
@@ -884,56 +892,138 @@ export async function fetchBoardingEventCounts(since) {
   } catch (err) { return { success: false, error: err.message }; }
 }
 
-/** Fetch the authoritative day summary from recorded events and the assigned duty personnel. */
+/** Fetch the authoritative day summary from recorded events, journeys, and local sessions. */
 export async function fetchDailyTripSummary({ since, dutySession } = {}) {
   try {
     let busId = null;
     if (dutySession?.plateNumber) {
-      const { data: bus, error: busError } = await supabase
+      const { data: bus } = await supabase
         .from('buses')
         .select('id')
         .eq('plate_number', dutySession.plateNumber)
         .maybeSingle();
-      if (busError) throw busError;
       busId = bus?.id || null;
     }
 
-    let eventsQuery = supabase
-      .from('boarding_events')
-      .select('trip_id,bus_id,journey_id,event_type,created_at,is_reversed')
-      .eq('is_reversed', false)
-      .gte('created_at', since)
-      .order('created_at', { ascending: true });
-    if (busId) eventsQuery = eventsQuery.eq('bus_id', busId);
-    if (!busId && dutySession?.tripId) eventsQuery = eventsQuery.eq('trip_id', dutySession.tripId);
-    const { data: events, error: eventsError } = await eventsQuery;
-    if (eventsError) throw eventsError;
+    // 1. Fetch boarding events for the period
+    let events = [];
+    try {
+      const { data: evts } = await supabase
+        .from('boarding_events')
+        .select('trip_id,bus_id,journey_id,event_type,created_at,is_reversed')
+        .eq('is_reversed', false)
+        .gte('created_at', since)
+        .order('created_at', { ascending: true });
+      events = evts || [];
+    } catch (_) {}
 
-    const journeyIds = [...new Set((events || []).map((event) => event.journey_id).filter(Boolean))];
-    let journeys = [];
-    if (journeyIds.length) {
-      const result = await supabase.from('passenger_journeys')
-        .select('id,origin_name,destination_name')
-        .in('id', journeyIds);
-      if (result.error) throw result.error;
-      journeys = result.data || [];
+    // 2. Fetch all passenger journeys created today
+    let dbJourneys = [];
+    try {
+      const { data: jData } = await supabase
+        .from('passenger_journeys')
+        .select('id,qr_token,origin_name,destination_name,passenger_count,status,boarded_at,alighted_at,created_at,trip_id')
+        .gte('created_at', since);
+      dbJourneys = jData || [];
+    } catch (_) {}
+
+    // 3. Read all stored local journeys from localStorage
+    const localJourneys = [];
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const plate = dutySession?.plateNumber || 'QC-BUS';
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && (key.startsWith('qcbus_registry_') || key.startsWith('qcbus_test_registry_'))) {
+            const val = localStorage.getItem(key);
+            if (val) {
+              const parsed = JSON.parse(val);
+              if (Array.isArray(parsed)) {
+                localJourneys.push(...parsed);
+              }
+            }
+          }
+        }
+      } catch (_) {}
     }
-    const journeyById = new Map(journeys.map((journey) => [journey.id, journey]));
+
+    // 4. Merge all journeys into consolidated map
+    const journeysMap = new Map();
+    for (const j of dbJourneys) {
+      if (j.id) journeysMap.set(j.id, j);
+      if (j.qr_token) journeysMap.set(j.qr_token, j);
+    }
+    for (const j of localJourneys) {
+      const idKey = j.id || j.qr_token;
+      if (idKey && !journeysMap.has(idKey)) {
+        journeysMap.set(idKey, j);
+      } else if (idKey && journeysMap.has(idKey)) {
+        journeysMap.set(idKey, { ...journeysMap.get(idKey), ...j });
+      }
+    }
+
+    // 5. Initialize Route 4 Stop summary rows
     const stopMap = new Map(ROUTE4_STOPS.map((stop) => [
       stop.name,
       { stopName: stop.name, boarded: 0, alighted: 0, total: 0, lastEventAt: null }
     ]));
-    (events || []).forEach((event) => {
-      const journey = journeyById.get(event.journey_id);
-      const stopName = event.event_type === 'board' ? journey?.origin_name : journey?.destination_name;
-      if (!stopName) return;
+
+    const countedBoardedJourneys = new Set();
+    const countedAlightedJourneys = new Set();
+
+    // Process explicit boarding events
+    events.forEach((event) => {
+      const journey = journeysMap.get(event.journey_id);
+      const stopRaw = event.event_type === 'board' ? journey?.origin_name : journey?.destination_name;
+      if (!stopRaw) return;
+      const resolved = resolveRoute4Stop(stopRaw);
+      const stopName = resolved?.name || stopRaw;
       const row = stopMap.get(stopName) || { stopName, boarded: 0, alighted: 0, total: 0, lastEventAt: null };
-      const passengers = 1;
-      if (event.event_type === 'board') row.boarded += passengers;
-      if (event.event_type === 'alight') row.alighted += passengers;
+      const paxCount = Math.max(1, Number(journey?.passenger_count || journey?.count) || 1);
+      if (event.event_type === 'board') {
+        row.boarded += paxCount;
+        if (event.journey_id) countedBoardedJourneys.add(event.journey_id);
+      } else if (event.event_type === 'alight') {
+        row.alighted += paxCount;
+        if (event.journey_id) countedAlightedJourneys.add(event.journey_id);
+      }
       row.lastEventAt = event.created_at;
       stopMap.set(stopName, row);
     });
+
+    // Also include journeys from registry/database that were boarded or completed but not present in boarding_events
+    for (const [key, j] of journeysMap.entries()) {
+      const isBoarded = j.status === 'boarded' || j.status === 'completed';
+      const isCompleted = j.status === 'completed';
+      const paxCount = Math.max(1, Number(j.passenger_count || j.count) || 1);
+
+      if (isBoarded && !countedBoardedJourneys.has(j.id) && !countedBoardedJourneys.has(j.qr_token)) {
+        const resolvedOrigin = resolveRoute4Stop(j.origin_name);
+        const originName = resolvedOrigin?.name || j.origin_name;
+        if (originName) {
+          const row = stopMap.get(originName) || { stopName: originName, boarded: 0, alighted: 0, total: 0, lastEventAt: null };
+          row.boarded += paxCount;
+          row.lastEventAt = j.boarded_at || j.created_at || row.lastEventAt;
+          stopMap.set(originName, row);
+          if (j.id) countedBoardedJourneys.add(j.id);
+          if (j.qr_token) countedBoardedJourneys.add(j.qr_token);
+        }
+      }
+
+      if (isCompleted && !countedAlightedJourneys.has(j.id) && !countedAlightedJourneys.has(j.qr_token)) {
+        const resolvedDest = resolveRoute4Stop(j.destination_name);
+        const destName = resolvedDest?.name || j.destination_name;
+        if (destName) {
+          const row = stopMap.get(destName) || { stopName: destName, boarded: 0, alighted: 0, total: 0, lastEventAt: null };
+          row.alighted += paxCount;
+          row.lastEventAt = j.alighted_at || row.lastEventAt;
+          stopMap.set(destName, row);
+          if (j.id) countedAlightedJourneys.add(j.id);
+          if (j.qr_token) countedAlightedJourneys.add(j.qr_token);
+        }
+      }
+    }
+
     let onboard = 0;
     const orderByName = new Map(ROUTE4_STOPS.map((stop, index) => [stop.name, index]));
     const stopRows = [...stopMap.values()].sort((a, b) => {
@@ -945,32 +1035,40 @@ export async function fetchDailyTripSummary({ since, dutySession } = {}) {
       return { ...row, total: onboard };
     });
 
+    const totalBoarded = stopRows.reduce((sum, row) => sum + row.boarded, 0);
+    const totalAlighted = stopRows.reduce((sum, row) => sum + row.alighted, 0);
+
     const personnelIds = [dutySession?.driverPersonnelId, dutySession?.conductorPersonnelId, dutySession?.dispatcherPersonnelId].filter(Boolean);
     let personnel = [];
     if (personnelIds.length) {
-      const result = await supabase.from('operations_personnel')
-        .select('personnel_id,full_name,personnel_type').in('personnel_id', personnelIds);
-      if (result.error) throw result.error;
-      personnel = result.data || [];
+      try {
+        const result = await supabase.from('operations_personnel')
+          .select('personnel_id,full_name,personnel_type').in('personnel_id', personnelIds);
+        personnel = result.data || [];
+      } catch (_) {}
     }
     const byType = (type, fallback) => personnel.find((person) => person.personnel_type === type)?.full_name || dutySession?.[`${type}Name`] || fallback;
-    const tripIds = [...new Set((events || []).map((event) => event.trip_id).filter(Boolean))];
+    const tripIds = [...new Set([
+      ...(events || []).map((e) => e.trip_id).filter(Boolean),
+      ...Array.from(journeysMap.values()).map((j) => j.trip_id).filter(Boolean)
+    ])];
+
     return {
       success: true,
       data: {
         events: events || [],
         stops: stopRows,
         totals: {
-          boarded: (events || []).filter((event) => event.event_type === 'board').length,
-          alighted: (events || []).filter((event) => event.event_type === 'alight').length,
-          passengersBoarded: stopRows.reduce((sum, row) => sum + row.boarded, 0),
-          passengersAlighted: stopRows.reduce((sum, row) => sum + row.alighted, 0)
+          boarded: totalBoarded,
+          alighted: totalAlighted,
+          passengersBoarded: totalBoarded,
+          passengersAlighted: totalAlighted
         },
         tripIds,
         driverName: byType('driver', 'Not assigned'),
         conductorName: byType('conductor', 'Not assigned'),
         dispatcherName: byType('dispatcher', 'Not assigned'),
-        plateNumber: dutySession?.plateNumber || 'Not assigned',
+        plateNumber: dutySession?.plateNumber || 'QC-BUS',
         serviceDate: dutySession?.serviceDate || new Date().toISOString().slice(0, 10)
       }
     };

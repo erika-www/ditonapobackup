@@ -1,3 +1,5 @@
+import { resolveRoute4Stop } from './route4Stops.js';
+
 /**
  * Shared QR Pass & Passenger Category Utilities
  * Standardizes:
@@ -111,11 +113,16 @@ export function createPassengerQrPayload({
 
   const companionsCount = Number(companions) >= 0 ? Number(companions) : Math.max(0, (Number(count) || 1) - 1);
   const totalPax = Math.max(1, Number(count) || (companionsCount + 1));
-  const bStop = extractStopName(boardingStop);
-  const dStop = extractStopName(destinationStop);
+  const rawB = extractStopName(boardingStop);
+  const rawD = extractStopName(destinationStop);
   const normalizedDirection = String(direction || 'Northbound').trim().toLowerCase().includes('south')
     ? 'Southbound'
     : 'Northbound';
+
+  const resolvedOrigin = resolveRoute4Stop(rawB, normalizedDirection);
+  const resolvedDest = resolveRoute4Stop(rawD, normalizedDirection);
+  const bStop = resolvedOrigin ? (resolvedOrigin.canonicalDbName || resolvedOrigin.name) : rawB;
+  const dStop = resolvedDest ? (resolvedDest.canonicalDbName || resolvedDest.name) : rawD;
 
   const cleanCompanionsList = Array.isArray(companionsList)
     ? companionsList.map((c, i) => ({
@@ -183,6 +190,23 @@ export function parsePassengerQRCode(raw) {
     return String(rawDir).trim().toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
   };
 
+  const resolveStopsInResult = (res) => {
+    if (!res) return res;
+    const resolvedB = resolveRoute4Stop(res.boardingStop, res.direction);
+    const resolvedD = resolveRoute4Stop(res.destinationStop, res.direction);
+    const bName = resolvedB ? (resolvedB.canonicalDbName || resolvedB.name) : (res.boardingStop || '');
+    const dName = resolvedD ? (resolvedD.canonicalDbName || resolvedD.name) : (res.destinationStop || '');
+    return {
+      ...res,
+      boardingStop: bName,
+      destinationStop: dName,
+      origin_name: bName,
+      destination_name: dName,
+      resolvedBoardingStop: resolvedB,
+      resolvedDestinationStop: resolvedD
+    };
+  };
+
   // 0. Direct object input
   if (typeof raw === 'object' && raw !== null) {
     const tripId = raw.tripId || raw.trip_id || raw.passId || raw.id || raw.dailyTripId || raw.qr_token || raw.token || 'PASS-00001';
@@ -194,7 +218,7 @@ export function parsePassengerQRCode(raw) {
     const direction = getDirection(raw);
     const companionsList = Array.isArray(raw.companionsList) ? raw.companionsList : [];
 
-    return {
+    return resolveStopsInResult({
       tripId: String(tripId).trim(),
       count: isNaN(count) || count < 1 ? 1 : count,
       companions: isNaN(companions) || companions < 0 ? 0 : companions,
@@ -209,7 +233,7 @@ export function parsePassengerQRCode(raw) {
       destinationStop,
       busPlate: String(raw.busPlate || raw.plateNumber || raw.bus_plate || '').trim(),
       raw: JSON.stringify(raw)
-    };
+    });
   }
 
   const str = String(raw).trim();
@@ -233,7 +257,7 @@ export function parsePassengerQRCode(raw) {
       const direction = getDirection(data);
       const companionsList = Array.isArray(data.companionsList) ? data.companionsList : [];
 
-      return {
+      return resolveStopsInResult({
         tripId: String(tripId).trim(),
         count: isNaN(count) || count < 1 ? 1 : count,
         companions: isNaN(companions) || companions < 0 ? 0 : companions,
@@ -248,7 +272,7 @@ export function parsePassengerQRCode(raw) {
         destinationStop,
         busPlate: String(data.busPlate || data.plateNumber || data.bus_plate || '').trim(),
         raw: str
-      };
+      });
     }
   } catch (_) { }
 
@@ -265,7 +289,7 @@ export function parsePassengerQRCode(raw) {
     const category = catMatch ? catMatch[1].trim() : 'Regular';
     const count = countMatch ? Number.parseInt(countMatch[1], 10) : 1;
     const direction = dirMatch && dirMatch[1].toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
-    return {
+    return resolveStopsInResult({
       tripId: tripIdMatch ? tripIdMatch[1].trim() : (str.match(/\b([0-9]{6}-[0-9]{5})\b/)?.[1] || generateDailyTripId()),
       count: isNaN(count) || count < 1 ? 1 : count,
       companions: count > 1 ? count - 1 : 0,
@@ -280,7 +304,7 @@ export function parsePassengerQRCode(raw) {
       destinationStop: destMatch ? extractStopName(destMatch[1]) : '',
       busPlate: busMatch ? busMatch[1].trim() : '',
       raw: str
-    };
+    });
   }
 
   // 3. Pipe-delimited string (e.g. QCBUS|101526-00001|1|Senior Citizen|Stop 1|Stop 11|Northbound)
@@ -295,7 +319,7 @@ export function parsePassengerQRCode(raw) {
       const destinationStop = extractStopName(parts[idIdx + 4]) || '';
       const rawDir = parts[idIdx + 5] || '';
       const direction = rawDir.toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
-      return {
+      return resolveStopsInResult({
         tripId,
         count: isNaN(count) || count < 1 ? 1 : count,
         companions: count > 1 ? count - 1 : 0,
@@ -310,14 +334,14 @@ export function parsePassengerQRCode(raw) {
         destinationStop,
         busPlate: '',
         raw: str
-      };
+      });
     }
   }
 
   // 4. Standalone MMDDYY-xxxxx regex match
   const standaloneId = str.match(/\b([0-9]{6}-[0-9]{5})\b/);
   if (standaloneId) {
-    return {
+    return resolveStopsInResult({
       tripId: standaloneId[1],
       count: 1,
       companions: 0,
@@ -332,10 +356,10 @@ export function parsePassengerQRCode(raw) {
       destinationStop: '',
       busPlate: '',
       raw: str
-    };
+    });
   }
 
-  return {
+  return resolveStopsInResult({
     tripId: str.slice(0, 32),
     count: 1,
     companions: 0,
@@ -350,5 +374,5 @@ export function parsePassengerQRCode(raw) {
     destinationStop: '',
     busPlate: '',
     raw: str
-  };
+  });
 }

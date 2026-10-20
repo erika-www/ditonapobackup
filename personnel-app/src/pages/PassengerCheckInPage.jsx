@@ -2,13 +2,14 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle, RefreshCw, Users, ShieldCheck, UserCheck, AlertCircle, MapPin, ChevronDown, ChevronUp, Camera } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import {
+  supabase,
   fetchOngoingTripForBus,
   fetchPassengerRegistry,
   recordBoardingEvent,
   fetchTripOccupancy,
   fetchJourneyByQrToken
 } from '../services/supabaseClient';
-import { ROUTE4_STOPS, resolveRoute4Stop, validateTripDirection } from '@shared/route4Stops';
+import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, resolveRoute4Stop, validateTripDirection } from '@shared/route4Stops';
 import { isPriorityCategory, parsePassengerQRCode } from '@shared/qrPassUtils';
 import { QrCameraScannerModal } from '../components/QrCameraScannerModal';
 
@@ -162,9 +163,10 @@ export function PassengerCheckInPage() {
     const catName = journey.passenger_category || journey.profiles?.passenger_category || journey.category || 'Regular';
     const passengerCount = Math.max(1, Number(journey.count || journey.passenger_count) || 1);
 
+    const busDir = dutySession?.tripDirection || 'Northbound';
     // Resolve boarding and destination stops against canonical Route 4 stops
-    const resolvedOrigin = resolveRoute4Stop(journey.parsed?.boardingStop || journey.origin_name) || ROUTE4_STOPS[0];
-    const resolvedDestination = resolveRoute4Stop(journey.parsed?.destinationStop || journey.destination_name) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
+    const resolvedOrigin = resolveRoute4Stop(journey.parsed?.boardingStop || journey.origin_name, busDir) || (busDir === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS[0] : ROUTE4_STOPS[0]);
+    const resolvedDestination = resolveRoute4Stop(journey.parsed?.destinationStop || journey.destination_name, busDir) || (busDir === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS[SOUTHBOUND_ROUTE4_STOPS.length - 1] : ROUTE4_STOPS[ROUTE4_STOPS.length - 1]);
 
     const result = await recordBoardingEvent({
       tripId: effectiveTripId,
@@ -172,6 +174,7 @@ export function PassengerCheckInPage() {
       method: 'qr',
       passengerId: journey.passenger_id || null,
       journeyId: journey.id,
+      busId: dutySession?.busId || null,
       idempotencyKey: `registry-${journey.id}-${eventType}-${Date.now()}`
     });
 
@@ -204,10 +207,22 @@ export function PassengerCheckInPage() {
           if (journey.id) {
             localStorage.setItem(`qcbus_scanned_${journey.id}`, JSON.stringify({ status: updatedJourney.status, scanned_at: now }));
           }
+
+          // Shared cookie for cross-port localhost sync
+          const cookiePayload = encodeURIComponent(JSON.stringify({
+            status: updatedJourney.status,
+            stop: resolvedOrigin.name,
+            time: Date.now()
+          }));
+          document.cookie = `qcbus_scan_${token}=${cookiePayload}; path=/; max-age=86400`;
+          if (journey.id) {
+            document.cookie = `qcbus_scan_${journey.id}=${cookiePayload}; path=/; max-age=86400`;
+          }
+
           const liveOcc = {
             bus_plate: plate,
             trip_id: effectiveTripId,
-            direction: dutySession?.tripDirection || 'Northbound',
+            direction: busDir,
             current_onboard: eventType === 'board' ? totalOnboard + passengerCount : Math.max(0, totalOnboard - passengerCount),
             bus_capacity: 50,
             available_seats: Math.max(0, 50 - (eventType === 'board' ? totalOnboard + passengerCount : Math.max(0, totalOnboard - passengerCount))),
@@ -223,6 +238,21 @@ export function PassengerCheckInPage() {
         } catch (_) {}
         return nextRows;
       });
+
+      // Background update to Supabase passenger_journeys table
+      try {
+        const updateData = {
+          status: updatedJourney.status,
+          trip_id: effectiveTripId,
+          origin_name: resolvedOrigin.name,
+          destination_name: resolvedDestination.name,
+          boarded_at: updatedJourney.boarded_at,
+          alighted_at: updatedJourney.alighted_at,
+          updated_at: now
+        };
+        const token = updatedJourney.qr_token || updatedJourney.id;
+        supabase.from('passenger_journeys').update(updateData).or(`id.eq."${journey.id}",qr_token.eq."${token}"`).catch(() => {});
+      } catch (_) {}
 
       if (eventType === 'board') {
         const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - passengerCount) : availablePrioritySeats;
@@ -279,12 +309,13 @@ export function PassengerCheckInPage() {
     const token = journey.qr_token || journey.id;
     const parsed = parsePassengerQRCode(raw);
 
-    // Resolve boarding & destination stops
-    const resolvedOrigin = resolveRoute4Stop(parsed?.boardingStop || journey.origin_name) || ROUTE4_STOPS[0];
-    const resolvedDestination = resolveRoute4Stop(parsed?.destinationStop || journey.destination_name) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
-
     // Direction validation
     const currentBusDir = dutySession?.tripDirection || 'Northbound';
+
+    // Resolve boarding & destination stops
+    const resolvedOrigin = resolveRoute4Stop(parsed?.boardingStop || journey.origin_name, currentBusDir) || (currentBusDir === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS[0] : ROUTE4_STOPS[0]);
+    const resolvedDestination = resolveRoute4Stop(parsed?.destinationStop || journey.destination_name, currentBusDir) || (currentBusDir === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS[SOUTHBOUND_ROUTE4_STOPS.length - 1] : ROUTE4_STOPS[ROUTE4_STOPS.length - 1]);
+
     const passengerDir = parsed?.direction || journey.route_direction || journey.direction;
     const dirValidation = validateTripDirection(passengerDir, resolvedOrigin, resolvedDestination, currentBusDir);
     if (!dirValidation.valid) {
