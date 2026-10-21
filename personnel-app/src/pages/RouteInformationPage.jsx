@@ -47,14 +47,47 @@ export function RouteInformationPage() {
   // Current Live Time & Date Today (Hours and Minutes ONLY)
   const [currentTime, setCurrentTime] = useState(new Date());
 
-  useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
   // Direction State (Northbound vs Southbound)
-  const [direction, setDirection] = useState(dutySession.tripDirection || 'Northbound');
+  const [direction, setDirection] = useState(dutySession?.tripDirection || 'Northbound');
   const [routeStops, setRouteStops] = useState(ROUTE4_STOPS);
+
+  // Dynamic Stops list according to direction
+  const [stopsList, setStopsList] = useState(direction === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS : routeStops);
+
+  // Current stop index & Trip movement state
+  const [currentStopIndex, setCurrentStopIndex] = useState(0);
+  const [headingStopIndex, setHeadingStopIndex] = useState(1);
+  const [isTripActive, setIsTripActive] = useState(false);
+  const [tripCount, setTripCount] = useState(1);
+  const [statusMessage, setStatusMessage] = useState(null);
+
+  const testRegistryKey = `qcbus_test_registry_${dutySession?.tripId || 'local'}_${new Date().toISOString().slice(0, 10)}`;
+  const tripSegmentKey = `${testRegistryKey}_started_at`;
+  const [tripSegmentStartedAt, setTripSegmentStartedAt] = useState(() => Number(localStorage.getItem(tripSegmentKey)) || 0);
+  const [passengerRegistry, setPassengerRegistry] = useState(() => {
+    try {
+      const plate = dutySession?.plateNumber || 'QC-BUS';
+      const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
+      const saved = localStorage.getItem(key);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [operationalTripId, setOperationalTripId] = useState(null);
+
+  // Real-time Vehicle Device Geolocation State
+  const [deviceGps, setDeviceGps] = useState({
+    active: false,
+    latitude: null,
+    longitude: null,
+    accuracy: null,
+    speed: null,
+    heading: null,
+    error: null,
+    lastUpdated: null,
+    source: null
+  });
 
   // Pi 3B Bus Announcer Connection & State (Rule 2: GET /api/state every 2 to 3 seconds)
   const [announcerInfo, setAnnouncerInfo] = useState({
@@ -63,8 +96,25 @@ export function RouteInformationPage() {
     lastCheck: null,
     state: null
   });
-  const [headingStopIndex, setHeadingStopIndex] = useState(1);
 
+  // Manual Registration State
+  const [showManualRegistration, setShowManualRegistration] = useState(false);
+  const [manualPassengerCategory, setManualPassengerCategory] = useState('Regular');
+  const [manualPassengerCount, setManualPassengerCount] = useState(1);
+  const [manualDestination, setManualDestination] = useState('');
+  const [manualRegistrationBusy, setManualRegistrationBusy] = useState(false);
+  const manualSubmissionRef = useRef(false);
+
+  const scannerBufferRef = useRef('');
+  const scannerResetTimerRef = useRef(null);
+
+  // Clock Poller
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Pi 3B State Poller (Rule 2)
   useEffect(() => {
     let active = true;
     const pollState = async () => {
@@ -109,9 +159,7 @@ export function RouteInformationPage() {
     return () => { active = false; clearInterval(timer); };
   }, [isTripActive]);
 
-  // Dynamic Stops list according to direction
-  const [stopsList, setStopsList] = useState(direction === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS : routeStops);
-
+  // Stops Initializer
   useEffect(() => {
     let mounted = true;
     fetchConfiguredRoute4Stops().then((result) => {
@@ -122,6 +170,7 @@ export function RouteInformationPage() {
     return () => { mounted = false; };
   }, []);
 
+  // Ordered Stops List
   useEffect(() => {
     const orderedStops = applyRoute4CoordinateOverrides(
       direction === 'Southbound' ? [...routeStops].reverse() : routeStops,
@@ -133,49 +182,6 @@ export function RouteInformationPage() {
       id: direction === 'Southbound' ? `sb-stop-${idx + 1}` : `stop-${idx + 1}`
     })));
   }, [direction, routeStops]);
-
-  // Current stop index & Trip movement state
-  const [currentStopIndex, setCurrentStopIndex] = useState(0);
-  const [isTripActive, setIsTripActive] = useState(false);
-  const [tripCount, setTripCount] = useState(1);
-  const [statusMessage, setStatusMessage] = useState(null);
-  const testRegistryKey = `qcbus_test_registry_${dutySession.tripId || 'local'}_${new Date().toISOString().slice(0, 10)}`;
-  const tripSegmentKey = `${testRegistryKey}_started_at`;
-  const [tripSegmentStartedAt, setTripSegmentStartedAt] = useState(() => Number(localStorage.getItem(tripSegmentKey)) || 0);
-  const [passengerRegistry, setPassengerRegistry] = useState(() => {
-    try {
-      const plate = dutySession?.plateNumber || 'QC-BUS';
-      const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
-      const saved = localStorage.getItem(key);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-  const [operationalTripId, setOperationalTripId] = useState(null);
-
-  // Real-time Vehicle Device Geolocation State
-  const [deviceGps, setDeviceGps] = useState({
-    active: false,
-    latitude: null,
-    longitude: null,
-    accuracy: null,
-    speed: null,
-    heading: null,
-    error: null,
-    lastUpdated: null
-  });
-
-  // Manual Registration State
-  const [showManualRegistration, setShowManualRegistration] = useState(false);
-  const [manualPassengerCategory, setManualPassengerCategory] = useState('Regular');
-  const [manualPassengerCount, setManualPassengerCount] = useState(1);
-  const [manualDestination, setManualDestination] = useState('');
-  const [manualRegistrationBusy, setManualRegistrationBusy] = useState(false);
-  const manualSubmissionRef = useRef(false);
-
-  const scannerBufferRef = useRef('');
-  const scannerResetTimerRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -212,7 +218,7 @@ export function RouteInformationPage() {
     refreshRegistry();
     const timer = setInterval(refreshRegistry, 4000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [dutySession.tripId, dutySession.plateNumber, operationalTripId, isTestMode, tripSegmentStartedAt, isTripActive, testRegistryKey]);
+  }, [dutySession?.tripId, dutySession?.plateNumber, operationalTripId, isTestMode, tripSegmentStartedAt, isTripActive, testRegistryKey]);
 
   useEffect(() => {
     try {
@@ -238,7 +244,7 @@ export function RouteInformationPage() {
     return acc + (!isPri ? (Number(curr.count) || 1) : 0);
   }, 0);
 
-  const busCapacity = Number(dutySession.busCapacity) || 50;
+  const busCapacity = Number(dutySession?.busCapacity) || 50;
   const prioritySeatCapacity = Math.min(20, busCapacity);
   const regularSeatCapacity = Math.max(0, busCapacity - prioritySeatCapacity);
   const availablePrioritySeats = Math.max(0, prioritySeatCapacity - priorityBoarded);
