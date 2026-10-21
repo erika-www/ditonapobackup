@@ -423,26 +423,28 @@ export function RouteInformationPage() {
     }
   };
 
-  // Process incoming device geolocation fix from navigator.geolocation
-  const processNewGpsPosition = (position) => {
-    if (!position || !position.coords) return;
-    const pLat = position.coords.latitude;
-    const pLng = position.coords.longitude;
-    const speedKmh = position.coords.speed == null ? null : position.coords.speed * 3.6;
+  // Process incoming GPS fix received from Pi 3B (UDP 5005 via bridge)
+  // Pi 3B sends the GPS signal to Pi 4B; Pi 4B only receives it.
+  const processPi3bGpsFix = (fix) => {
+    if (!fix || !fix.fix || fix.lost) return;
+    const pLat = fix.latitude;
+    const pLng = fix.longitude;
+    const speedKmh = fix.speed != null ? fix.speed : null;
 
     setDeviceGps({
       active: true,
       latitude: pLat,
       longitude: pLng,
-      accuracy: position.coords.accuracy,
+      accuracy: fix.accuracy || 5,
       speed: speedKmh,
-      heading: position.coords.heading,
+      heading: fix.heading || null,
       error: null,
-      lastUpdated: new Date()
+      lastUpdated: new Date(),
+      source: 'pi3b_udp'
     });
 
     // Broadcast position to Supabase & passenger app
-    broadcastBusGps(pLat, pLng, speedKmh, position.coords.heading, position.coords.accuracy);
+    broadcastBusGps(pLat, pLng, speedKmh, fix.heading || null, fix.accuracy || 5);
 
     // If trip is active, check proximity to stops (5-meter radius arrival)
     if (isTripActive && stopsList.length > 0) {
@@ -477,88 +479,38 @@ export function RouteInformationPage() {
     }
   };
 
-  const requestImmediateGpsFix = () => {
-    if (typeof navigator !== 'undefined' && navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          processNewGpsPosition(pos);
-          setStatusMessage(`📍 Live GPS position acquired: ${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`);
-        },
-        (error) => {
-          setDeviceGps(prev => ({ ...prev, error: error.message }));
-          setStatusMessage(`GPS notice: ${error.message}`);
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 }
-      );
-    } else {
-      setStatusMessage('Geolocation is not supported by this browser/device.');
+  const requestImmediateGpsFix = async () => {
+    try {
+      const fix = await fetchLatestBridgeGps();
+      if (fix && fix.fix && !fix.lost && typeof fix.latitude === 'number' && typeof fix.longitude === 'number') {
+        processPi3bGpsFix(fix);
+        setStatusMessage(`📍 Pi 3B GPS fix: ${fix.latitude.toFixed(4)}, ${fix.longitude.toFixed(4)}`);
+      } else {
+        setStatusMessage('Pi 3B GPS: Waiting for signal or GPS lost (>5s).');
+      }
+    } catch (err) {
+      setStatusMessage(`Pi 3B GPS query error: ${err.message}`);
     }
   };
 
   useEffect(() => {
     resolveBusId();
-  }, [dutySession.plateNumber]);
+  }, [dutySession?.plateNumber]);
 
-  // Geolocation Watcher for Personnel App (Continuous vehicle tracking)
+  // Hardware Bridge GPS Stream Poller from Pi 3B -> Pi 4B bridge (UDP 5005)
+  // Pi 3B has the GPS hardware receiver and streams UDP packets to Pi 4B on port 5005.
+  // Pi 4B ONLY receives this stream; it does NOT broadcast or query browser geolocation.
+  // Rule 3: 1Hz stream; treat data older than about 5 seconds as "GPS lost"
   useEffect(() => {
     let cancelled = false;
-    let watchId = null;
 
-    if (typeof navigator !== 'undefined' && navigator.geolocation) {
-      // 1. Immediate GPS fix upon duty session / component mount
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          if (!cancelled) processNewGpsPosition(pos);
-        },
-        (err) => {
-          if (!cancelled) {
-            setDeviceGps(prev => ({ ...prev, error: err.message }));
-          }
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 }
-      );
-
-      // 2. Continuous real-time geolocation watching
-      watchId = navigator.geolocation.watchPosition(
-        (pos) => {
-          if (!cancelled) processNewGpsPosition(pos);
-        },
-        (err) => {
-          if (!cancelled) {
-            setDeviceGps(prev => ({ ...prev, error: err.message }));
-          }
-        },
-        { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
-      );
-    }
-
-    // 3. Hardware Bridge GPS Stream Poller from Pi 3B -> Pi 4B bridge (UDP 5005)
-    // Rule 3: 1Hz stream; treat data older than about 5 seconds as "GPS lost"
     const bridgeGpsTimer = setInterval(async () => {
       if (cancelled) return;
       const fix = await fetchLatestBridgeGps();
       if (cancelled) return;
 
       if (fix && fix.fix && !fix.lost && typeof fix.latitude === 'number' && typeof fix.longitude === 'number') {
-        const pLat = fix.latitude;
-        const pLng = fix.longitude;
-        const speedKmh = fix.speed != null ? fix.speed : null;
-
-        // Populate the GPS variable in personnel app
-        setDeviceGps({
-          active: true,
-          latitude: pLat,
-          longitude: pLng,
-          accuracy: fix.accuracy || 5,
-          speed: speedKmh,
-          heading: fix.heading || null,
-          error: null,
-          lastUpdated: new Date(),
-          source: 'pi3b_udp'
-        });
-
-        // Broadcast to Supabase & Passenger app
-        broadcastBusGps(pLat, pLng, speedKmh, fix.heading || null, fix.accuracy || 5);
+        processPi3bGpsFix(fix);
       } else {
         // Treat data older than 5 seconds or missing fix as "GPS lost" (Rule 3)
         setDeviceGps((prev) => {
@@ -575,12 +527,9 @@ export function RouteInformationPage() {
 
     return () => {
       cancelled = true;
-      if (watchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
-        navigator.geolocation.clearWatch(watchId);
-      }
       clearInterval(bridgeGpsTimer);
     };
-  }, [isTripActive, stopsList, dutySession.plateNumber]);
+  }, [isTripActive, stopsList, dutySession?.plateNumber]);
 
   // Keep a stable ref so keyboard event listener doesn't re-create repeatedly
   const handleQrScanRef = useRef(null);
@@ -1264,9 +1213,9 @@ export function RouteInformationPage() {
                   onClick={requestImmediateGpsFix}
                   className="btn btn-secondary"
                   style={{ padding: '0.12rem 0.45rem', fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
-                  title="Query and broadcast current browser/device geolocation fix to passengers"
+                  title="Poll latest GPS fix received from Pi 3B hardware stream"
                 >
-                  <RotateCcw size={10} /> Refresh GPS
+                  <RotateCcw size={10} /> Poll Pi 3B GPS
                 </button>
                 <strong style={{ fontSize: '1.05rem', color: 'var(--text-main)' }}>QC Bus Route 4</strong>
               </div>

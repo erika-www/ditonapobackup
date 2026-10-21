@@ -58,28 +58,15 @@ export function AuthProvider({ children }) {
   const [token, setToken] = useState(ENABLE_TEST_MODE ? 'test-access' : null);
   const [user, setUser] = useState(ENABLE_TEST_MODE ? { id: 'test-access', username: 'Test Administrator', role: 'admin' } : null);
   const [loading, setLoading] = useState(!ENABLE_TEST_MODE);
-  const [locationPermission, setLocationPermission] = useState(null);
+  const [locationPermission, setLocationPermission] = useState(true);
 
-  // Prompt location permission
+  // Pi 4B receives GPS hardware stream from Pi 3B via bridge on port 5005; browser geolocation is not used
   const requestLocationPermission = () => {
-    if (typeof navigator !== 'undefined' && navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          setLocationPermission(true);
-        },
-        (err) => {
-          console.warn('Location permission error or denied:', err);
-          setLocationPermission(false);
-        },
-        { enableHighAccuracy: true, timeout: 5000 }
-      );
-    } else {
-      setLocationPermission(true);
-    }
+    setLocationPermission(true);
   };
 
   useEffect(() => {
-    requestLocationPermission();
+    setLocationPermission(true);
   }, []);
 
   useEffect(() => {
