@@ -4,7 +4,7 @@
 Implemented strictly according to the "Pi 3B Interface for the Admin App (Pi 4B)" specification:
 
 Network:
-  - Pi 3B (Bus Announcer & GPS receiver): 192.168.10.3:8080
+  - Pi 3B (Bus Announcer & GPS receiver): 127.0.0.1:5000
   - Pi 4B (Personnel Admin App / Firefox Kiosk): 192.168.10.4
   - Bridge Local HTTP REST API: 0.0.0.0:5007 (with CORS enabled for browser)
   - UDP GPS listener: 0.0.0.0:5005 (incoming stream from Pi 3B)
@@ -23,7 +23,7 @@ Rules enforced:
      - Treat data older than about 5 seconds as "GPS lost".
   4. Browser isolation:
      - The browser calls http://localhost:5007, avoiding CORS and mixed-content issues.
-     - Bridge relays to Pi 3B on http://192.168.10.3:8080.
+     - Bridge relays to Pi 3B on http://127.0.0.1:5000.
      - Completely operational offline without internet.
 """
 
@@ -64,7 +64,7 @@ logging.basicConfig(
 log = logging.getLogger("pi4b_bridge")
 
 # Configuration via environment variables
-PI3B_URL = os.getenv("PI3B_URL", "http://192.168.10.3:8080").rstrip("/")
+PI3B_URL = os.getenv("PI3B_URL", "http://127.0.0.1:5000").rstrip("/")
 GPS_BIND = os.getenv("GPS_BIND", "0.0.0.0")
 GPS_PORT = int(os.getenv("GPS_PORT", "5005"))
 HTTP_BIND = os.getenv("HTTP_BIND", "0.0.0.0")
@@ -740,7 +740,7 @@ def main():
     HTTP_PORT = args.http_port
 
     if args.mock_3b:
-        PI3B_URL = "http://127.0.0.1:8080"
+        PI3B_URL = "http://127.0.0.1:5000"
         run_mock_pi3b(port=8080, gps_port=GPS_PORT)
 
     log.info("=================================================================")

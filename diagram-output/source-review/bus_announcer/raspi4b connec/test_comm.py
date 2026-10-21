@@ -12,7 +12,7 @@ Usage:
      python test_comm.py --mock-3b
 
   4. Test Real Pi 3B directly:
-     python test_comm.py --test-3b --ip 192.168.10.3
+     python test_comm.py --test-3b --ip 127.0.0.1
 """
 
 import argparse
@@ -81,7 +81,7 @@ def send_simulated_gps(host="127.0.0.1", port=5005, count=10, interval=1.0):
     print("[✓] Finished sending simulated GPS packets.")
 
 
-def test_pi3b_direct(ip="192.168.10.3", port=8080):
+def test_pi3b_direct(ip="127.0.0.1", port=8080):
     """Test communicating directly with Pi 3B HTTP API."""
     url = f"http://ip:{port}" if ":" in ip else f"http://{ip}:{port}"
     print(f"\n[*] Testing Pi 3B directly at {url}...")
@@ -227,7 +227,7 @@ def main():
     parser.add_argument("--send-gps", action="store_true", help="Send simulated UDP GPS packets (port 5005)")
     parser.add_argument("--test-3b", action="store_true", help="Test Pi 3B HTTP API directly")
     parser.add_argument("--mock-3b", action="store_true", help="Run a mock Pi 3B server for testing without hardware")
-    parser.add_argument("--ip", default="192.168.10.3", help="Pi 3B IP address (default: 192.168.10.3)")
+    parser.add_argument("--ip", default="127.0.0.1", help="Pi 3B IP address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8080, help="Pi 3B HTTP port (default: 8080)")
 
     args = parser.parse_args()

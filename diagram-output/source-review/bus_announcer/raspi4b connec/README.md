@@ -29,10 +29,10 @@ This guide documents the communication protocol between the **Raspberry Pi 4B** 
  |   +---------+----------------------------------^--------------------------+   |
  +-------------|----------------------------------|------------------------------+
                | Ethernet (HTTP commands)         | Ethernet (UDP GPS stream)
-               | Target: http://192.168.10.3:8080 | Target: 192.168.10.4:5005
+               | Target: http://127.0.0.1:5000 | Target: 192.168.10.4:5005
                v                                  |
  +-------------+----------------------------------+------------------------------+
- |                        RASPBERRY PI 3B (192.168.10.3)                         |
+ |                        RASPBERRY PI 3B (127.0.0.1)                         |
  |                                                                               |
  |   - Hardware: VK-162 GPS (USB serial), 3.5mm Audio Speaker, HDMI Monitor      |
  |   - GPS Sender (sender.py): Transmits UDP packets at 1 Hz to 192.168.10.4:5005|
@@ -57,7 +57,7 @@ This guide documents the communication protocol between the **Raspberry Pi 4B** 
 ---
 
 ### Direction 2: Pi 4B sends Commands & Queries to Pi 3B
-* **Transport**: HTTP to `http://192.168.10.3:8080`.
+* **Transport**: HTTP to `http://127.0.0.1:5000`.
 * **Headers**: `Content-Type: application/json`.
 
 #### 1. Start Trip: `POST /api/trip/start`
@@ -116,7 +116,7 @@ The Personnel App runs inside Firefox. Browsers operate in a sandboxed security 
 2. It listens to UDP 5005 for GPS packets from Pi 3B and stores the latest coordinates in memory.
 3. It exposes a local HTTP server on `http://localhost:5007` with full CORS headers.
 4. When the user interacts with Firefox (e.g., clicking "Start Trip" or changing direction), the React frontend calls `POST http://localhost:5007/api/trip/start`.
-5. `bridge.py` immediately relays the command across Ethernet to Pi 3B (`http://192.168.10.3:8080/api/trip/start`).
+5. `bridge.py` immediately relays the command across Ethernet to Pi 3B (`http://127.0.0.1:5000/api/trip/start`).
 6. The frontend polls `http://localhost:5007/api/gps` to receive real-time vehicle GPS fixes received from Pi 3B.
 
 ---
@@ -172,7 +172,7 @@ Tests `/health`, `/api/status`, and `/api/gps` on `http://localhost:5007`.
 
 ### Test 2: Test Direct Communication with Pi 3B
 ```bash
-python3 test_comm.py --test-3b --ip 192.168.10.3
+python3 test_comm.py --test-3b --ip 127.0.0.1
 ```
 Pings `GET /api/state`, `POST /api/trip/start`, and `POST /api/trip/end` directly on Pi 3B.
 
