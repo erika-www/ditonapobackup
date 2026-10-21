@@ -728,7 +728,7 @@ def run_mock_pi3b(port=8080, gps_port=5005):
 def main():
     global PI3B_URL, GPS_PORT, HTTP_PORT
     parser = argparse.ArgumentParser(description="DITO NA PO - Pi 4B <-> Pi 3B Communication Bridge")
-    parser.add_argument("--mock-3b", action="store_true", help="Run built-in Mock Pi 3B for offline testing")
+    parser.add_argument("--mock-3b", "--sim", dest="mock_3b", action="store_true", help="Run built-in Mock Pi 3B for offline simulation/testing")
     parser.add_argument("--pi3b-url", default=PI3B_URL, help=f"Target Pi 3B URL (default: {PI3B_URL})")
     parser.add_argument("--gps-port", type=int, default=GPS_PORT, help=f"UDP GPS port (default: {GPS_PORT})")
     parser.add_argument("--http-port", type=int, default=HTTP_PORT, help=f"Bridge HTTP port (default: {HTTP_PORT})")
@@ -746,7 +746,7 @@ def main():
     log.info("=================================================================")
     log.info(" DITO NA PO - Raspberry Pi 4B <-> Pi 3B Communication Bridge")
     log.info("=================================================================")
-    log.info(" Target Pi 3B Announcer : %s", PI3B_URL)
+    log.info(" Target Pi 3B Announcer : %s %s", PI3B_URL, "(MOCK / SIMULATED)" if args.mock_3b else "")
     log.info(" Local HTTP API (CORS)  : http://%s:%d", HTTP_BIND, HTTP_PORT)
     log.info(" UDP GPS Listener       : %s:%d", GPS_BIND, GPS_PORT)
     log.info(" GPS Staleness Timeout  : %.1f seconds", GPS_STALE_TIMEOUT)
@@ -758,7 +758,9 @@ def main():
     if is_online:
         log.info("[✓] Pi 3B Bus Announcer is ONLINE at %s", PI3B_URL)
     else:
-        log.warning("[!] Pi 3B Bus Announcer is currently OFFLINE at %s (waiting for connection)", PI3B_URL)
+        log.warning("[!] Pi 3B Bus Announcer is currently OFFLINE at %s", PI3B_URL)
+        if not args.mock_3b:
+            log.info(" [TIP] To test without hardware, start with simulation mode: python pi4b_bridge.py --sim")
 
     # Thread 1: Local HTTP REST Server (serves Personnel App on Pi 4B)
     http_thread = threading.Thread(target=run_http_server, daemon=True, name="BridgeHttpServer")
