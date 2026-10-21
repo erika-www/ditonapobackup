@@ -41,123 +41,115 @@ export function StopQueuePredictor({ selectedStop, direction = 'Northbound' }) {
   }, [slots, activeFilter, searchTime]);
 
   const getCrowdBg = (level) => {
-    if (level === 'High') return 'rgba(239, 68, 68, 0.12)';
-    if (level === 'Moderate') return 'rgba(245, 158, 11, 0.12)';
-    return 'rgba(16, 185, 129, 0.12)';
+    if (level === 'High') return '#fee2e2';
+    if (level === 'Moderate') return '#fef3c7';
+    return '#ecfdf5';
   };
 
   const getCrowdBorder = (level) => {
-    if (level === 'High') return 'rgba(239, 68, 68, 0.35)';
-    if (level === 'Moderate') return 'rgba(245, 158, 11, 0.35)';
-    return 'rgba(16, 185, 129, 0.35)';
+    if (level === 'High') return '#fecaca';
+    if (level === 'Moderate') return '#fde68a';
+    return '#a7f3d0';
+  };
+
+  const getCrowdBadgeColor = (level) => {
+    if (level === 'High') return '#ef4444';
+    if (level === 'Moderate') return '#f59e0b';
+    return '#10b981';
   };
 
   return (
     <div style={{
       marginTop: '1rem',
-      borderRadius: 'var(--radius-lg, 12px)',
+      borderRadius: '16px',
       border: '1px solid var(--border-color, #e2e8f0)',
       background: 'var(--bg-card, #ffffff)',
-      padding: '1.1rem 1.25rem',
-      boxShadow: '0 2px 12px rgba(0, 0, 0, 0.03)',
+      padding: '1.25rem 1.35rem',
+      boxShadow: '0 2px 10px rgba(0, 0, 0, 0.03)',
       display: 'flex',
       flexDirection: 'column',
-      gap: '0.85rem'
+      gap: '0.9rem'
     }}>
-      {/* Top Header: Stop Name & AI Badge */}
+      {/* Top Header: Matching Attached Reference Image */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
-          <span style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '0.3rem',
-            padding: '0.2rem 0.55rem',
-            borderRadius: '9999px',
-            fontSize: '0.72rem',
-            fontWeight: 700,
-            backgroundColor: 'rgba(139, 92, 246, 0.12)',
-            color: '#7c3aed',
-            border: '1px solid rgba(139, 92, 246, 0.25)'
-          }}>
-            <Sparkles size={12} /> Random Forest Forecast
-          </span>
-          <strong style={{ fontSize: '0.92rem', color: 'var(--text-main, #0f172a)' }}>
-            Predicted Queue · {shortName || canonicalName}
-          </strong>
-        </div>
+        <h4 style={{
+          margin: 0,
+          fontSize: '1rem',
+          fontWeight: 800,
+          color: 'var(--text-main, #0f172a)',
+          letterSpacing: '-0.01em'
+        }}>
+          Estimated Passenger Queue at Boarding Stop:
+        </h4>
 
         <div style={{
-          fontSize: '0.72rem',
+          fontSize: '0.8rem',
           fontWeight: 700,
-          padding: '0.15rem 0.5rem',
-          borderRadius: '6px',
-          backgroundColor: activeSlot.isUpcoming ? 'rgba(59, 130, 246, 0.12)' : (activeSlot.isClosed ? 'rgba(100, 116, 139, 0.12)' : 'rgba(16, 185, 129, 0.12)'),
-          color: activeSlot.isUpcoming ? '#2563eb' : (activeSlot.isClosed ? '#64748b' : '#059669'),
-          border: `1px solid ${activeSlot.isUpcoming ? 'rgba(59, 130, 246, 0.25)' : (activeSlot.isClosed ? 'rgba(100, 116, 139, 0.25)' : 'rgba(16, 185, 129, 0.25)')}`,
+          padding: '0.3rem 0.8rem',
+          borderRadius: '9999px',
+          backgroundColor: activeSlot.isUpcoming ? '#eff6ff' : (activeSlot.isClosed ? '#f1f5f9' : '#e6f7f0'),
+          color: activeSlot.isUpcoming ? '#2563eb' : (activeSlot.isClosed ? '#475569' : '#0f766e'),
+          border: `1px solid ${activeSlot.isUpcoming ? '#bfdbfe' : (activeSlot.isClosed ? '#cbd5e1' : '#a7f3d0')}`,
           display: 'inline-flex',
           alignItems: 'center',
-          gap: '0.3rem'
+          gap: '0.35rem'
         }}>
-          {activeSlot.isUpcoming ? '⏰ Upcoming Operating Window' : (activeSlot.isClosed ? '🌙 After Operating Hours' : '● Current Window')}
+          <span style={{ fontSize: '0.95rem', lineHeight: 1 }}>•</span>
+          {activeSlot.isUpcoming ? 'Upcoming Window' : (activeSlot.isClosed ? 'After Operating Hours' : 'Current Window')}
         </div>
       </div>
 
-      {/* Primary Display: Current Time Period Predicted Queue Only */}
+      {/* Primary Display: Queue Container Matching Attached Image */}
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
-        padding: '0.85rem 1.1rem',
-        borderRadius: '10px',
+        padding: '0.95rem 1.25rem',
+        borderRadius: '14px',
         backgroundColor: getCrowdBg(activeSlot.crowdLevel),
-        border: `1.5px solid ${getCrowdBorder(activeSlot.crowdLevel)}`,
+        border: `1px solid ${getCrowdBorder(activeSlot.crowdLevel)}`,
         flexWrap: 'wrap',
         gap: '0.85rem'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.95rem' }}>
           <div style={{
-            width: '44px',
-            height: '44px',
-            borderRadius: '10px',
-            backgroundColor: activeSlot.crowdColor,
+            width: '46px',
+            height: '46px',
+            borderRadius: '11px',
+            backgroundColor: getCrowdBadgeColor(activeSlot.crowdLevel),
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             color: '#ffffff',
             flexShrink: 0,
-            boxShadow: `0 2px 8px ${activeSlot.crowdColor}55`
+            boxShadow: '0 2px 6px rgba(0, 0, 0, 0.08)'
           }}>
-            <Users size={22} />
+            <Users size={22} strokeWidth={2.2} />
           </div>
 
-          <div>
-            <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted, #64748b)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-              <Clock size={13} color="var(--primary, #0284c7)" />
-              Current Time Slot: <strong>{activeSlot.label}</strong> ({activeSlot.duration}m interval)
-            </div>
-            <div style={{ fontSize: '1.28rem', fontWeight: 800, color: 'var(--text-main, #0f172a)', lineHeight: 1.25 }}>
-              ~{activeSlot.predictedQueue} passengers in queue
-            </div>
+          <div style={{
+            fontSize: '1.45rem',
+            fontWeight: 800,
+            color: 'var(--text-main, #0f172a)',
+            letterSpacing: '-0.02em',
+            lineHeight: 1.15
+          }}>
+            ~{activeSlot.predictedQueue} passengers in queue
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-          <div style={{
-            padding: '0.3rem 0.75rem',
-            borderRadius: '9999px',
-            backgroundColor: activeSlot.crowdColor,
-            color: '#ffffff',
-            fontSize: '0.78rem',
-            fontWeight: 800,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '0.3rem'
-          }}>
-            {activeSlot.crowdLevel} Crowd
-          </div>
-          <div style={{ fontSize: '0.76rem', color: 'var(--text-secondary, #475569)', fontWeight: 600 }}>
-            ~{activeSlot.avgQueuePerBus} pax / arriving bus
-          </div>
+        <div style={{
+          padding: '0.42rem 1.15rem',
+          borderRadius: '9999px',
+          backgroundColor: getCrowdBadgeColor(activeSlot.crowdLevel),
+          color: '#ffffff',
+          fontSize: '0.88rem',
+          fontWeight: 800,
+          display: 'inline-flex',
+          alignItems: 'center',
+          boxShadow: '0 2px 6px rgba(0, 0, 0, 0.08)'
+        }}>
+          {activeSlot.crowdLevel} Crowd
         </div>
       </div>
 
@@ -169,21 +161,22 @@ export function StopQueuePredictor({ selectedStop, direction = 'Northbound' }) {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          gap: '0.5rem',
-          padding: '0.65rem 1rem',
-          fontSize: '0.84rem',
+          gap: '0.45rem',
+          padding: '0.72rem 1rem',
+          fontSize: '0.88rem',
           fontWeight: 700,
-          borderRadius: '8px',
-          border: showTrends ? '1px solid var(--primary, #0284c7)' : '1px solid var(--border-color, #cbd5e1)',
-          backgroundColor: showTrends ? 'rgba(2, 132, 199, 0.08)' : 'var(--bg-subtle, #f8fafc)',
-          color: 'var(--primary, #0284c7)',
+          borderRadius: '10px',
+          border: '1px solid #e0f2fe',
+          backgroundColor: showTrends ? '#e0f2fe' : '#f0f7ff',
+          color: '#0284c7',
           cursor: 'pointer',
-          transition: 'all 0.18s ease'
+          transition: 'all 0.18s ease',
+          width: '100%'
         }}
       >
-        <TrendingUp size={15} />
-        {showTrends ? 'Hide Other Time Slot Trends' : 'View Other Time Slot Passenger Queue Trends'}
-        {showTrends ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+        <TrendingUp size={16} strokeWidth={2.4} style={{ color: '#0284c7' }} />
+        <span>View Other Time Slot Passenger Queue Trends</span>
+        {showTrends ? <ChevronUp size={16} strokeWidth={2.4} /> : <ChevronDown size={16} strokeWidth={2.4} />}
       </button>
 
       {/* Collapsible Section: Only shown when the user clicks the option */}

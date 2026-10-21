@@ -400,7 +400,7 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
         borderRadius: 'var(--radius-md)',
         border: '1px solid var(--border-color)'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
           <MapIcon size={18} color="var(--primary)" />
           <span style={{ fontWeight: 700, fontSize: '0.92rem' }}>
             Route 4 Live Corridor Map (15 Stops)
@@ -408,6 +408,23 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
           <span style={{ fontSize: '0.75rem', padding: '0.15rem 0.5rem', borderRadius: '12px', background: '#7c3aed', color: '#fff', fontWeight: 700 }}>
             Active
           </span>
+          {liveBusCoords && Number.isFinite(Number(liveBusCoords.lat)) && (
+            <span style={{
+              fontSize: '0.74rem',
+              padding: '0.15rem 0.55rem',
+              borderRadius: '9999px',
+              background: isSignalLost ? '#fee2e2' : '#dcfce7',
+              color: isSignalLost ? '#dc2626' : '#15803d',
+              border: `1px solid ${isSignalLost ? '#fca5a5' : '#86efac'}`,
+              fontWeight: 700,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.3rem'
+            }}>
+              <span className="pulse-dot" style={{ backgroundColor: isSignalLost ? '#dc2626' : '#15803d', width: '6px', height: '6px' }}></span>
+              🚌 Bus Live ({liveBusCoords.speed ? `${liveBusCoords.speed.toFixed(1)} km/h` : 'GPS In-Motion'})
+            </span>
+          )}
         </div>
 
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>

@@ -1117,15 +1117,31 @@ export async function publishCurrentBusLocation(busId, position) {
     const speed = position.speed == null ? null : Number(position.speed);
     const heading = position.heading == null ? null : Number(position.heading);
     const accuracy = position.accuracy == null ? null : Number(position.accuracy);
-    const { error } = await supabase.from('bus_current_location').upsert({
+    const nowIso = new Date().toISOString();
+
+    const locationPayload = {
       bus_id: busId,
       latitude,
       longitude,
       speed: Number.isFinite(speed) && speed >= 0 ? speed : null,
       heading: Number.isFinite(heading) && heading >= 0 && heading <= 360 ? heading : null,
       accuracy: Number.isFinite(accuracy) && accuracy >= 0 ? accuracy : null,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'bus_id' });
+      updated_at: nowIso
+    };
+
+    // Mirror to local storage and BroadcastChannel for instant zero-latency cross-tab sync
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('qcbus_live_bus_coords', JSON.stringify(locationPayload));
+        if (window.BroadcastChannel) {
+          const bc = new BroadcastChannel('qcbus_live_channel');
+          bc.postMessage({ type: 'BUS_LOCATION_UPDATE', payload: locationPayload });
+          bc.close();
+        }
+      } catch (_) {}
+    }
+
+    const { error } = await supabase.from('bus_current_location').upsert(locationPayload, { onConflict: 'bus_id' });
     if (error) throw error;
     return { success: true };
   } catch (err) {

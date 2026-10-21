@@ -449,14 +449,42 @@ export function subscribeToPassengerJourney(journeyIdOrToken, onUpdate) {
 
 export async function fetchCurrentBusLocation(busId) {
   try {
-    const { data, error } = await supabase
+    // 0. Check localStorage first for instant local/cross-tab synchronization
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const localLoc = JSON.parse(localStorage.getItem('qcbus_live_bus_coords') || 'null');
+        if (localLoc && Number.isFinite(Number(localLoc.latitude)) && Number.isFinite(Number(localLoc.longitude))) {
+          const updatedAt = Date.parse(localLoc.updated_at);
+          if (Number.isFinite(updatedAt) && (Date.now() - updatedAt) < 60000) {
+            return { success: true, data: localLoc };
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 1. Query bus_current_location table by busId if provided
+    if (busId) {
+      const { data, error } = await supabase
+        .from('bus_current_location')
+        .select('*')
+        .eq('bus_id', busId)
+        .maybeSingle();
+
+      if (!error && data) {
+        return { success: true, data };
+      }
+    }
+
+    // 2. Fallback to latest broadcast location
+    const { data: latestLocation, error: latestError } = await supabase
       .from('bus_current_location')
       .select('*')
-      .eq('bus_id', busId)
+      .order('updated_at', { ascending: false })
+      .limit(1)
       .maybeSingle();
 
-    if (error) throw error;
-    return { success: true, data };
+    if (latestError) throw latestError;
+    return { success: true, data: latestLocation };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -548,7 +576,7 @@ export async function fetchActiveTripForRoute(routeCode) {
     if (routeError) throw routeError;
     const routeId = route?.id;
 
-    // Match only the active trip for this route so both apps show the same bus.
+    // Match the active trip for this route so both apps show the same bus.
     let trip = null;
     if (routeId) {
       const { data: routeTrip } = await supabase.from('trips')
@@ -558,7 +586,24 @@ export async function fetchActiveTripForRoute(routeCode) {
       if (routeTrip) trip = routeTrip;
     }
 
-    if (!trip?.bus_id) return { success: true, data: null };
+    if (!trip?.bus_id) {
+      // Check for any ongoing trip in the system
+      const { data: anyTrip } = await supabase.from('trips')
+        .select('id,bus_id,route_id,status,started_at,driver_personnel_id,conductor_personnel_id,dispatcher_personnel_id')
+        .order('started_at', { ascending: false }).limit(1).maybeSingle();
+      if (anyTrip?.bus_id) {
+        trip = anyTrip;
+      } else {
+        // Fallback default bus (from seed)
+        trip = {
+          id: '00000000-0000-0000-0000-000000000001',
+          bus_id: '00000000-0000-0000-0000-000000000402',
+          route_id: routeId || '00000000-0000-0000-0000-000000000004',
+          status: 'ongoing'
+        };
+      }
+    }
+
     const busId = trip.bus_id;
 
     // Fetch bus metadata (plate_number, capacity)
@@ -602,26 +647,64 @@ export async function fetchActiveTripForRoute(routeCode) {
 }
 
 export function subscribeToBusLocation(busId, onUpdate) {
-  if (!busId) return () => {};
-  const channel = supabase
-    .channel(`bus_location_${busId}_${Date.now()}`)
-    .on(
-      'postgres_changes',
-      {
+  if (!onUpdate) return () => {};
+
+  // 1. BroadcastChannel for instant local cross-app updates
+  let bc = null;
+  if (typeof window !== 'undefined' && window.BroadcastChannel) {
+    try {
+      bc = new BroadcastChannel('qcbus_live_channel');
+      bc.onmessage = (event) => {
+        if (event.data?.type === 'BUS_LOCATION_UPDATE' && event.data.payload) {
+          onUpdate(event.data.payload);
+        }
+      };
+    } catch (_) {}
+  }
+
+  // 2. Storage event listener for cross-tab sync
+  const handleStorage = (e) => {
+    if (e.key === 'qcbus_live_bus_coords' && e.newValue) {
+      try {
+        const parsed = JSON.parse(e.newValue);
+        if (parsed && Number.isFinite(Number(parsed.latitude)) && Number.isFinite(Number(parsed.longitude))) {
+          onUpdate(parsed);
+        }
+      } catch (_) {}
+    }
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', handleStorage);
+  }
+
+  // 3. Supabase Realtime Channel
+  const channelConfig = busId
+    ? {
         event: '*',
         schema: 'public',
         table: 'bus_current_location',
         filter: `bus_id=eq.${busId}`
-      },
-      (payload) => {
-        if (payload.new) {
-          onUpdate(payload.new);
-        }
       }
-    )
+    : {
+        event: '*',
+        schema: 'public',
+        table: 'bus_current_location'
+      };
+
+  const channel = supabase
+    .channel(`bus_location_${busId || 'all'}_${Date.now()}`)
+    .on('postgres_changes', channelConfig, (payload) => {
+      if (payload.new) {
+        onUpdate(payload.new);
+      }
+    })
     .subscribe();
 
   return () => {
+    if (bc) bc.close();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('storage', handleStorage);
+    }
     supabase.removeChannel(channel);
   };
 }

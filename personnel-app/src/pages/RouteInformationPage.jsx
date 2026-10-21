@@ -114,6 +114,18 @@ export function RouteInformationPage() {
   });
   const [operationalTripId, setOperationalTripId] = useState(null);
 
+  // Real-time Vehicle Device Geolocation State
+  const [deviceGps, setDeviceGps] = useState({
+    active: false,
+    latitude: null,
+    longitude: null,
+    accuracy: null,
+    speed: null,
+    heading: null,
+    error: null,
+    lastUpdated: null
+  });
+
   // Manual Registration State
   const [showManualRegistration, setShowManualRegistration] = useState(false);
   const [manualPassengerCategory, setManualPassengerCategory] = useState('Regular');
@@ -306,21 +318,41 @@ export function RouteInformationPage() {
     return null;
   };
 
-  // Helper to broadcast moving vehicle GPS to Supabase so passenger app updates in real-time
+  // Helper to broadcast moving vehicle GPS to Supabase & local channels so passenger app updates in real-time
   const broadcastBusGps = async (latitude, longitude, speed, heading, accuracy) => {
     let bId = busIdRef.current;
     if (!bId) {
       bId = await resolveBusId();
     }
-    if (!bId) return;
+    if (!bId) {
+      bId = '00000000-0000-0000-0000-000000000402';
+      busIdRef.current = bId;
+    }
 
-    return publishCurrentBusLocation(bId, {
-      latitude,
-      longitude,
-      speed: speed == null ? null : speed,
-      heading: heading == null ? null : heading,
-      accuracy: accuracy == null ? null : accuracy
-    });
+    const payload = {
+      bus_id: bId,
+      plate_number: dutySession.plateNumber || 'QC-BUS-0402',
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      speed: speed == null ? null : Number(speed),
+      heading: heading == null ? null : Number(heading),
+      accuracy: accuracy == null ? null : Number(accuracy),
+      updated_at: new Date().toISOString()
+    };
+
+    // Instant local/cross-tab sync via BroadcastChannel & localStorage
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('qcbus_live_bus_coords', JSON.stringify(payload));
+        if (window.BroadcastChannel) {
+          const bc = new BroadcastChannel('qcbus_live_channel');
+          bc.postMessage({ type: 'BUS_LOCATION_UPDATE', payload });
+          bc.close();
+        }
+      } catch (_) {}
+    }
+
+    return publishCurrentBusLocation(bId, payload);
   };
 
   const triggerArrivalAtStop = (stopIdx) => {
@@ -345,71 +377,30 @@ export function RouteInformationPage() {
     }
   };
 
-  useEffect(() => {
-    resolveBusId();
-  }, [dutySession.plateNumber]);
+  // Process incoming device geolocation fix from navigator.geolocation
+  const processNewGpsPosition = (position) => {
+    if (!position || !position.coords) return;
+    const pLat = position.coords.latitude;
+    const pLng = position.coords.longitude;
+    const speedKmh = position.coords.speed == null ? null : position.coords.speed * 3.6;
 
-  useEffect(() => {
-    if (!isTripActive) return undefined;
-    let cancelled = false;
+    setDeviceGps({
+      active: true,
+      latitude: pLat,
+      longitude: pLng,
+      accuracy: position.coords.accuracy,
+      speed: speedKmh,
+      heading: position.coords.heading,
+      error: null,
+      lastUpdated: new Date()
+    });
 
-    const toRadians = (degrees) => degrees * Math.PI / 180;
+    // Broadcast position to Supabase & passenger app
+    broadcastBusGps(pLat, pLng, speedKmh, position.coords.heading, position.coords.accuracy);
 
-    // 1. Device GPS Watcher (temporarily bypassed). QR registration uses the
-    // stops encoded in the pass and must work from any physical location.
-    let watchId = null;
-    const useDeviceGps = false;
-    if (useDeviceGps && navigator.geolocation) {
-      watchId = navigator.geolocation.watchPosition((position) => {
-        const pLat = position.coords.latitude;
-        const pLng = position.coords.longitude;
-        const speedKmh = position.coords.speed == null ? null : position.coords.speed * 3.6;
-
-        broadcastBusGps(pLat, pLng, speedKmh, position.coords.heading, position.coords.accuracy);
-
-        let arrivalStopIndex = -1;
-        let closestDistanceMeters = Infinity;
-
-        for (let index = 0; index < stopsList.length; index += 1) {
-          const stopLat = Number(stopsList[index].lat);
-          const stopLng = Number(stopsList[index].lng);
-          if (!Number.isFinite(stopLat) || !Number.isFinite(stopLng)) continue;
-
-          const latDelta = toRadians(stopLat - pLat);
-          const lngDelta = toRadians(stopLng - pLng);
-          const haversine = Math.sin(latDelta / 2) ** 2
-            + Math.cos(toRadians(pLat)) * Math.cos(toRadians(stopLat)) * Math.sin(lngDelta / 2) ** 2;
-          const distanceMeters = 6371000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
-
-          if (distanceMeters <= ARRIVAL_RADIUS_METERS && distanceMeters < closestDistanceMeters) {
-            arrivalStopIndex = index;
-            closestDistanceMeters = distanceMeters;
-          }
-        }
-
-        if (arrivalStopIndex < 0) return;
-        const arrivalStopKey = stopsList[arrivalStopIndex].id || arrivalStopIndex;
-        if (lastTriggeredStopRef.current !== arrivalStopKey) {
-          lastTriggeredStopRef.current = arrivalStopKey;
-          triggerArrivalAtStop(arrivalStopIndex);
-        }
-      }, (error) => setStatusMessage(`Waiting for bus location: ${error.message}`), {
-        enableHighAccuracy: true, maximumAge: 2000, timeout: 15000
-      });
-    }
-
-    // 2. Hardware Bridge GPS Poller from Pi 3B / Pi 4B bridge
-    const bridgeGpsTimer = setInterval(async () => {
-      if (cancelled || !isTripActive) return;
-      const fix = await fetchLatestBridgeGps();
-      if (!fix || !fix.fix || fix.latitude == null || fix.longitude == null) return;
-
-      const pLat = fix.latitude;
-      const pLng = fix.longitude;
-
-      // Broadcast hardware GPS from vehicle to Supabase
-      broadcastBusGps(pLat, pLng, fix.speed, fix.heading, fix.accuracy);
-
+    // If trip is active, check proximity to stops (5-meter radius arrival)
+    if (isTripActive && stopsList.length > 0) {
+      const toRadians = (degrees) => degrees * Math.PI / 180;
       let arrivalStopIndex = -1;
       let closestDistanceMeters = Infinity;
 
@@ -437,14 +428,80 @@ export function RouteInformationPage() {
           triggerArrivalAtStop(arrivalStopIndex);
         }
       }
+    }
+  };
+
+  const requestImmediateGpsFix = () => {
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          processNewGpsPosition(pos);
+          setStatusMessage(`📍 Live GPS position acquired: ${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`);
+        },
+        (error) => {
+          setDeviceGps(prev => ({ ...prev, error: error.message }));
+          setStatusMessage(`GPS notice: ${error.message}`);
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 }
+      );
+    } else {
+      setStatusMessage('Geolocation is not supported by this browser/device.');
+    }
+  };
+
+  useEffect(() => {
+    resolveBusId();
+  }, [dutySession.plateNumber]);
+
+  // Geolocation Watcher for Personnel App (Continuous vehicle tracking)
+  useEffect(() => {
+    let cancelled = false;
+    let watchId = null;
+
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+      // 1. Immediate GPS fix upon duty session / component mount
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          if (!cancelled) processNewGpsPosition(pos);
+        },
+        (err) => {
+          if (!cancelled) {
+            setDeviceGps(prev => ({ ...prev, error: err.message }));
+          }
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 }
+      );
+
+      // 2. Continuous real-time geolocation watching
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          if (!cancelled) processNewGpsPosition(pos);
+        },
+        (err) => {
+          if (!cancelled) {
+            setDeviceGps(prev => ({ ...prev, error: err.message }));
+          }
+        },
+        { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+      );
+    }
+
+    // 3. Hardware Bridge GPS Poller from Pi 3B / Pi 4B bridge (if connected on bus)
+    const bridgeGpsTimer = setInterval(async () => {
+      if (cancelled) return;
+      const fix = await fetchLatestBridgeGps();
+      if (!fix || !fix.fix || fix.latitude == null || fix.longitude == null) return;
+      broadcastBusGps(fix.latitude, fix.longitude, fix.speed, fix.heading, fix.accuracy);
     }, 2500);
 
     return () => {
       cancelled = true;
-      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+      if (watchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchId);
+      }
       clearInterval(bridgeGpsTimer);
     };
-  }, [isTripActive, currentStopIndex, stopsList, dutySession.plateNumber]);
+  }, [isTripActive, stopsList, dutySession.plateNumber]);
 
   // Keep a stable ref so keyboard event listener doesn't re-create repeatedly
   const handleQrScanRef = useRef(null);
@@ -1072,10 +1129,43 @@ export function RouteInformationPage() {
                     <VolumeX size={12} /> Pi 3B Announcer Offline
                   </span>
                 )}
+                <span
+                  className="badge"
+                  style={{
+                    fontSize: '0.72rem',
+                    padding: '0.15rem 0.5rem',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.25rem',
+                    backgroundColor: deviceGps.active ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+                    color: deviceGps.active ? '#34d399' : '#f59e0b',
+                    border: `1px solid ${deviceGps.active ? '#10b981' : '#f59e0b'}`
+                  }}
+                  title={deviceGps.active ? `Live GPS position broadcasting to passenger app: ${deviceGps.latitude?.toFixed(5)}, ${deviceGps.longitude?.toFixed(5)}` : 'Waiting for device geolocation signal'}
+                >
+                  <MapPin size={12} />
+                  {deviceGps.active
+                    ? `🛰️ Live GPS Active (${deviceGps.speed ? `${deviceGps.speed.toFixed(1)} km/h` : 'Locked'})`
+                    : (deviceGps.error ? `🛰️ GPS: ${deviceGps.error}` : '🛰️ GPS: Acquiring...')}
+                </span>
+                <button
+                  type="button"
+                  onClick={requestImmediateGpsFix}
+                  className="btn btn-secondary"
+                  style={{ padding: '0.12rem 0.45rem', fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
+                  title="Query and broadcast current browser/device geolocation fix to passengers"
+                >
+                  <RotateCcw size={10} /> Refresh GPS
+                </button>
                 <strong style={{ fontSize: '1.05rem', color: 'var(--text-main)' }}>QC Bus Route 4</strong>
               </div>
               <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
                 Driver: <strong>{dutySession.driverName}</strong> ({dutySession.driverId}) | Unit: <strong>{dutySession.plateNumber || 'QC-BUS'}</strong>
+                {deviceGps.active && (
+                  <span style={{ marginLeft: '0.5rem', color: '#10b981', fontWeight: 600 }}>
+                    · Broadcast Position: {deviceGps.latitude?.toFixed(4)}, {deviceGps.longitude?.toFixed(4)}
+                  </span>
+                )}
               </div>
             </div>
 
