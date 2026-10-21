@@ -49,8 +49,8 @@ HTTP_BIND = os.getenv("HTTP_BIND", "0.0.0.0")
 HTTP_PORT = int(os.getenv("HTTP_PORT", "5007"))
 
 # Pi 3B Announcer Endpoint
-# Per specification: Pi 3B runs on 127.0.0.1:5000 over local Ethernet
-PI3B_URL = os.getenv("PI3B_URL", "http://127.0.0.1:5000").rstrip("/")
+# Per specification: Pi 3B runs on 192.168.10.3:8080 over local Ethernet
+PI3B_URL = os.getenv("PI3B_URL", "http://192.168.10.3:8080").rstrip("/")
 
 # Rate limits & intervals
 GPS_UPLOAD_INTERVAL = float(os.getenv("GPS_UPLOAD_INTERVAL", "2.0"))  # >=1.5s for ingest-gps

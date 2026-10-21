@@ -164,7 +164,7 @@ export function RouteInformationPage() {
             const plate = dutySession?.plateNumber || 'QC-BUS';
             const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
             localStorage.setItem(key, JSON.stringify(combined));
-          } catch (_) {}
+          } catch (_) { }
           return combined;
         });
       }
@@ -179,7 +179,7 @@ export function RouteInformationPage() {
       const plate = dutySession?.plateNumber || 'QC-BUS';
       const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
       localStorage.setItem(key, JSON.stringify(passengerRegistry));
-    } catch (_) {}
+    } catch (_) { }
   }, [isTestMode, passengerRegistry, testRegistryKey, dutySession?.plateNumber]);
 
   const currentStop = stopsList[currentStopIndex] || stopsList[0];
@@ -277,7 +277,7 @@ export function RouteInformationPage() {
         }
         return ongoing.data.bus_id;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     // 2. Check bus by plate number
     try {
@@ -287,7 +287,7 @@ export function RouteInformationPage() {
         busIdRef.current = bus.id;
         return bus.id;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     // 3. Ensure duty trip is started for bus
     try {
@@ -303,7 +303,7 @@ export function RouteInformationPage() {
         if (started.data.trip?.id) setOperationalTripId(started.data.trip.id);
         return started.data.bus.id;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     // 4. Fallback to any active bus
     try {
@@ -313,7 +313,7 @@ export function RouteInformationPage() {
         busIdRef.current = fallbackBus.id;
         return fallbackBus.id;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     return null;
   };
@@ -349,7 +349,7 @@ export function RouteInformationPage() {
           bc.postMessage({ type: 'BUS_LOCATION_UPDATE', payload });
           bc.close();
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     return publishCurrentBusLocation(bId, payload);
@@ -655,7 +655,7 @@ export function RouteInformationPage() {
             updated_at: now
           };
           localStorage.setItem('qcbus_live_occupancy', JSON.stringify(liveOcc));
-        } catch (_) {}
+        } catch (_) { }
         return nextRows;
       });
 
@@ -666,8 +666,8 @@ export function RouteInformationPage() {
           boarded_at: updatedJourney.boarded_at,
           alighted_at: updatedJourney.alighted_at,
           updated_at: now
-        }).or(`qr_token.eq."${token}",id.eq."${token}"`).then(() => {}).catch(() => {});
-      } catch (_) {}
+        }).or(`qr_token.eq."${token}",id.eq."${token}"`).then(() => { }).catch(() => { });
+      } catch (_) { }
 
       setStatusMessage(nextEventType === 'board'
         ? `✓ ${count} passenger${count === 1 ? '' : 's'} boarded (${cat}). Total Onboard: ${totalOnboard + count}/${capacity}. Boarded at: ${resolvedOrigin.name} → Destination: ${resolvedDestination.name}.`
@@ -741,7 +741,7 @@ export function RouteInformationPage() {
           updated_at: now
         };
         localStorage.setItem('qcbus_live_occupancy', JSON.stringify(liveOcc));
-      } catch (_) {}
+      } catch (_) { }
       return nextRows;
     });
 
@@ -772,11 +772,11 @@ export function RouteInformationPage() {
         updated_at: now
       };
       if (journey.id && isUuid(journey.id)) {
-        supabase.from('passenger_journeys').update(updateData).or(`id.eq."${journey.id}",qr_token.eq."${token}"`).catch(() => {});
+        supabase.from('passenger_journeys').update(updateData).or(`id.eq."${journey.id}",qr_token.eq."${token}"`).catch(() => { });
       } else if (token) {
-        supabase.from('passenger_journeys').update(updateData).eq('qr_token', token).catch(() => {});
+        supabase.from('passenger_journeys').update(updateData).eq('qr_token', token).catch(() => { });
       }
-    } catch (_) {}
+    } catch (_) { }
 
     await recordBoardingEvent({
       tripId: effectiveTripId,
@@ -920,7 +920,7 @@ export function RouteInformationPage() {
         const plate = dutySession?.plateNumber || 'QC-BUS';
         const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
         localStorage.setItem(key, JSON.stringify(next));
-      } catch (_) {}
+      } catch (_) { }
       return next;
     });
 
@@ -933,7 +933,7 @@ export function RouteInformationPage() {
         supabase.from('passenger_journeys')
           .update({ status: 'completed', alighted_at: now })
           .eq('id', journey.id)
-          .catch(() => {});
+          .catch(() => { });
         if (activeTripId) {
           recordBoardingEvent({
             tripId: activeTripId,
@@ -941,7 +941,7 @@ export function RouteInformationPage() {
             method: 'dashboard',
             journeyId: journey.id,
             idempotencyKey: `alight-${journey.id}-${Date.now()}`
-          }).catch(() => {});
+          }).catch(() => { });
         }
       }
     }
@@ -960,7 +960,7 @@ export function RouteInformationPage() {
         const plate = dutySession?.plateNumber || 'QC-BUS';
         const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
         localStorage.setItem(key, JSON.stringify(next));
-      } catch (_) {}
+      } catch (_) { }
       return next;
     });
 
@@ -1056,7 +1056,7 @@ export function RouteInformationPage() {
         const plate = dutySession?.plateNumber || 'QC-BUS';
         const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
         localStorage.setItem(key, JSON.stringify(next));
-      } catch (_) {}
+      } catch (_) { }
       return next;
     });
 
