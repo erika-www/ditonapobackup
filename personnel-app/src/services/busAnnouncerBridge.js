@@ -3,40 +3,17 @@
  * Communicates with the local Pi 4B bridge (pi4b_bridge.py / bridge.py) on port 5007 (or via /bridge dev proxy).
  *
  * Implemented strictly according to the "Pi 3B Interface for the Admin App (Pi 4B)" specification:
- * 1. Commands:
+ * 1. Commands (4B -> 3B):
  *    - POST /api/trip/start with body { direction: 'Northbound' | 'Southbound' }
  *    - POST /api/trip/end with body {}
  *    - Direction must be exactly 'Northbound' or 'Southbound'
  *    - Replies: 200 ok; 400 bad direction; 409 already active; 403 network forbidden
- * 2. Status:
+ * 2. Status (4B -> 3B):
  *    - GET /api/state every 2 to 3 seconds. If fails/times out -> "Pi 3B Announcer Offline"
- * 3. GPS Stream:
+ * 3. GPS Stream (3B -> 4B):
  *    - GET /api/gps (backed by UDP 5005). Data older than 5 seconds is treated as "GPS lost"
- *
- * Built-in Simulation Mode:
- *    - When the physical Pi 3B / Pi 4B bridge is offline (e.g., local PC simulation or testing),
- *      the service gracefully falls back to simulated Pi 3B announcer responses and streams
- *      live simulated GPS coordinates advancing along the 15 Route 4 stops.
- *    - When the physical bridge on port 5007 IS reachable, it seamlessly uses the live hardware.
+ *    - Strictly consumes REAL GPS coordinates streamed from Pi 3B. No mock or auto-moving stops.
  */
-import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS } from '@shared/route4Stops';
-
-// In-memory simulation state for offline development & simulation
-const simState = {
-  active: false,
-  direction: 'Northbound',
-  trips_done: 0,
-  current_idx: 0,
-  idx: 1,
-  progress: 0.0,
-  lastGpsUpdate: Date.now(),
-  lastLat: Number(ROUTE4_STOPS[0]?.lat || 14.650221),
-  lastLng: Number(ROUTE4_STOPS[0]?.lng || 121.052022),
-};
-
-function roundCoord(num) {
-  return Math.round(Number(num) * 1e6) / 1e6;
-}
 
 /**
  * Determine the local bridge API base URL safely across Vite dev server and Firefox Kiosk production.
@@ -63,7 +40,7 @@ export function getBridgeBaseUrl() {
  *
  * @param {'Northbound' | 'Southbound'} direction
  * @param {{ force?: boolean }} [options]
- * @returns {Promise<{ ok: boolean, success: boolean, direction?: string, pi3b_response?: any, conflict?: boolean, status?: number, error?: string, simulated?: boolean }>}
+ * @returns {Promise<{ ok: boolean, success: boolean, direction?: string, pi3b_response?: any, conflict?: boolean, status?: number, error?: string }>}
  */
 export async function sendTripStart(direction, options = {}) {
   const norm = String(direction || '').trim();
@@ -93,7 +70,6 @@ export async function sendTripStart(direction, options = {}) {
         ok: true,
         success: true,
         direction: data.direction || norm,
-        simulated: false,
         pi3b_response: data.pi3b_response,
       };
     }
@@ -110,42 +86,22 @@ export async function sendTripStart(direction, options = {}) {
       };
     }
 
-    if (response.status === 400) {
-      return {
-        ok: false,
-        success: false,
-        status: 400,
-        error: data.error || 'Invalid direction parameter',
-        pi3b_response: data.pi3b_response,
-      };
-    }
+    return {
+      ok: false,
+      success: false,
+      status: response.status,
+      error: data.error || `Bridge returned HTTP ${response.status}`,
+      pi3b_response: data.pi3b_response,
+    };
   } catch (err) {
-    console.info('[BusAnnouncerBridge] Physical bridge offline; activating built-in Simulation Mode:', err.message);
+    console.warn('[BusAnnouncerBridge] Could not send start trip to bridge:', err.message);
+    return {
+      ok: false,
+      success: false,
+      status: 502,
+      error: 'Pi 3B Announcer Offline (Bridge unreachable)',
+    };
   }
-
-  // Graceful Simulation Mode fallback
-  simState.active = true;
-  simState.direction = norm;
-  simState.current_idx = 0;
-  simState.idx = 1;
-  simState.progress = 0.0;
-  const stops = norm === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS : ROUTE4_STOPS;
-  simState.lastLat = Number(stops[0]?.lat || 14.650221);
-  simState.lastLng = Number(stops[0]?.lng || 121.052022);
-  simState.lastGpsUpdate = Date.now();
-
-  return {
-    ok: true,
-    success: true,
-    direction: norm,
-    simulated: true,
-    pi3b_response: {
-      ok: true,
-      direction: norm,
-      label: norm === 'Northbound' ? 'QC Hall Interchange -> SB Road' : 'SB Road -> QC Hall Interchange',
-      simulated: true
-    }
-  };
 }
 
 export const sendDirectionToBridge = sendTripStart;
@@ -153,7 +109,7 @@ export const sendDirectionToBridge = sendTripStart;
 /**
  * End or pause the current trip on the Pi 3B Bus Announcer (POST /api/trip/end {}).
  *
- * @returns {Promise<{ ok: boolean, success: boolean, error?: string, pi3b_response?: any, simulated?: boolean }>}
+ * @returns {Promise<{ ok: boolean, success: boolean, error?: string, pi3b_response?: any }>}
  */
 export async function sendTripEnd() {
   try {
@@ -163,28 +119,31 @@ export async function sendTripEnd() {
       body: JSON.stringify({}),
     });
 
+    const data = await response.json().catch(() => ({}));
     if (response.ok) {
-      const data = await response.json().catch(() => ({}));
       return {
         ok: true,
         success: true,
-        simulated: false,
         pi3b_response: data.pi3b_response
       };
     }
-  } catch (err) {
-    console.info('[BusAnnouncerBridge] Physical bridge offline; ending in Simulation Mode:', err.message);
-  }
 
-  // Graceful Simulation Mode fallback
-  simState.active = false;
-  simState.trips_done += 1;
-  return {
-    ok: true,
-    success: true,
-    simulated: true,
-    pi3b_response: { ok: true, simulated: true }
-  };
+    return {
+      ok: false,
+      success: false,
+      status: response.status,
+      error: data.error || `Bridge returned HTTP ${response.status}`,
+      pi3b_response: data.pi3b_response
+    };
+  } catch (err) {
+    console.warn('[BusAnnouncerBridge] Could not send end trip to bridge:', err.message);
+    return {
+      ok: false,
+      success: false,
+      status: 502,
+      error: 'Pi 3B Announcer Offline (Bridge unreachable)',
+    };
+  }
 }
 
 export const endTripOnBridge = sendTripEnd;
@@ -192,53 +151,52 @@ export const endTripOnBridge = sendTripEnd;
 /**
  * Fetch raw status snapshot of the Pi 3B Announcer (GET /api/state).
  * Rule 2: GET /api/state every 2 to 3 seconds.
+ * If it fails or times out, returns { online: false, error: 'Pi 3B Announcer Offline' }.
+ *
+ * Variables in reply from Pi 3B:
+ * - active: true while a trip is running
+ * - trip: "Northbound", "Southbound", or null
+ * - trip_label: Route text e.g. "QC Hall Interchange -> SB Road"
+ * - stops: List of stop names in order (15 stops)
+ * - current_idx: Index of last stop reached (0 = first)
+ * - idx: Index of stop the bus is heading to
+ * - phase: idle, waiting, approaching, or at_stop
+ * - dist: Meters to next stop or null
+ * - trips_done: Number of completed trips
+ * - last_trip: { direction, finished_at } or null
+ * - gps: { fix: true/false, lat, lon, kmh }
  *
  * @returns {Promise<any>}
  */
 export async function fetchAnnouncerState() {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
+    const timeout = setTimeout(() => controller.abort(), 2500);
 
     const response = await fetch(`${getBridgeBaseUrl()}/api/state`, {
       signal: controller.signal
     });
     clearTimeout(timeout);
 
-    if (response.ok) {
-      const data = await response.json();
-      if (data && data.online !== false && !data.error) {
-        return { online: true, simulated: false, ...data };
-      }
+    if (!response.ok) {
+      return { online: false, error: 'Pi 3B Announcer Offline' };
     }
-  } catch (_) {}
 
-  // Simulation Mode fallback: return live simulated announcer state
-  const stops = simState.direction === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS : ROUTE4_STOPS;
-  return {
-    online: true,
-    simulated: true,
-    active: simState.active,
-    trip: simState.active ? simState.direction : null,
-    trip_label: simState.direction === 'Northbound' ? 'QC Hall Interchange -> SB Road' : 'SB Road -> QC Hall Interchange',
-    stops: stops.map((s) => s.name),
-    current_idx: simState.current_idx,
-    idx: simState.idx,
-    phase: simState.active ? 'approaching' : 'idle',
-    dist: simState.active ? Math.max(10, Math.round(150 * (1 - simState.progress))) : null,
-    trips_done: simState.trips_done,
-    gps: {
-      fix: true,
-      lat: roundCoord(simState.lastLat),
-      lon: roundCoord(simState.lastLng),
-      kmh: simState.active ? 28.5 : 0
+    const data = await response.json();
+    if (data.online === false || data.error) {
+      return { online: false, error: data.error || 'Pi 3B Announcer Offline', ...data };
     }
-  };
+
+    return { online: true, ...data };
+  } catch {
+    return { online: false, error: 'Pi 3B Announcer Offline' };
+  }
 }
 
 /**
- * Fetch the latest GPS fix received by Pi 4B from the Pi 3B GPS receiver over UDP 5005.
+ * Fetch the latest REAL GPS fix received by Pi 4B from the Pi 3B GPS receiver over UDP 5005.
  * Rule 3: Treat data older than about 5 seconds as "GPS lost".
+ * NO mock data or artificial moving stops. Strictly uses the live UDP stream from Pi 3B.
  *
  * @returns {Promise<{
  *   fix: boolean,
@@ -251,139 +209,116 @@ export async function fetchAnnouncerState() {
  *   timestamp?: number,
  *   age_seconds?: number | null,
  *   status: 'active' | 'lost',
- *   simulated?: boolean,
  *   error?: string
  * }>}
  */
 export async function fetchLatestBridgeGps() {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1500);
+    const timeout = setTimeout(() => controller.abort(), 2000);
 
     const response = await fetch(`${getBridgeBaseUrl()}/api/gps`, {
       signal: controller.signal,
     });
     clearTimeout(timeout);
 
-    if (response.ok) {
-      const data = await response.json();
-      const isLost = Boolean(data.lost)
-        || !data.fix
-        || (typeof data.age_seconds === 'number' && data.age_seconds > 5.0)
-        || data.latitude == null
-        || data.longitude == null;
-
-      if (!isLost) {
-        return {
-          fix: true,
-          lost: false,
-          latitude: Number(data.latitude),
-          longitude: Number(data.longitude),
-          timestamp: data.timestamp,
-          speed: data.speed != null ? Number(data.speed) : null,
-          heading: data.heading != null ? Number(data.heading) : null,
-          accuracy: data.accuracy || 5,
-          age_seconds: data.age_seconds,
-          status: 'active',
-          simulated: false
-        };
-      }
-    }
-  } catch (_) {}
-
-  // Simulation Mode GPS Generator (smooth movement along the Route 4 stops)
-  const stops = simState.direction === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS : ROUTE4_STOPS;
-  const fromStop = stops[simState.current_idx] || stops[0];
-  const toStop = stops[simState.idx] || stops[stops.length - 1];
-
-  if (simState.active && stops.length > 1) {
-    // Progress along stop segment: takes ~10-12 ticks between consecutive stops in simulation
-    simState.progress += 0.09;
-    if (simState.progress >= 1.0) {
-      simState.progress = 0.0;
-      simState.current_idx = Math.min(stops.length - 1, simState.current_idx + 1);
-      simState.idx = Math.min(stops.length - 1, simState.current_idx + 1);
-      if (simState.current_idx >= stops.length - 1) {
-        // Final stop reached!
-        simState.active = false;
-        simState.trips_done += 1;
-      }
+    if (!response.ok) {
+      return {
+        fix: false,
+        lost: true,
+        latitude: null,
+        longitude: null,
+        status: 'lost',
+        error: 'Bridge offline'
+      };
     }
 
-    const currFrom = stops[simState.current_idx] || stops[0];
-    const currTo = stops[simState.idx] || currFrom;
-    simState.lastLat = Number(currFrom.lat) + (Number(currTo.lat) - Number(currFrom.lat)) * simState.progress;
-    simState.lastLng = Number(currFrom.lng) + (Number(currTo.lng) - Number(currFrom.lng)) * simState.progress;
-  } else {
-    // At rest at current stop
-    simState.lastLat = Number(fromStop.lat);
-    simState.lastLng = Number(fromStop.lng);
+    const data = await response.json();
+
+    // Rule 3: Treat data older than about 5 seconds as "GPS lost"
+    const isLost = Boolean(data.lost)
+      || !data.fix
+      || (typeof data.age_seconds === 'number' && data.age_seconds > 5.0)
+      || data.latitude == null
+      || data.longitude == null;
+
+    if (!isLost) {
+      return {
+        fix: true,
+        lost: false,
+        latitude: Number(data.latitude),
+        longitude: Number(data.longitude),
+        timestamp: data.timestamp,
+        speed: data.speed != null ? Number(data.speed) : null,
+        heading: data.heading != null ? Number(data.heading) : null,
+        accuracy: data.accuracy || 5,
+        age_seconds: data.age_seconds,
+        status: 'active'
+      };
+    }
+
+    return {
+      fix: false,
+      lost: true,
+      latitude: null,
+      longitude: null,
+      timestamp: data.timestamp,
+      speed: null,
+      heading: null,
+      age_seconds: data.age_seconds,
+      status: 'lost',
+      error: 'GPS lost'
+    };
+  } catch (err) {
+    return {
+      fix: false,
+      lost: true,
+      latitude: null,
+      longitude: null,
+      status: 'lost',
+      error: err.message || 'GPS lost'
+    };
   }
-
-  return {
-    fix: true,
-    lost: false,
-    latitude: roundCoord(simState.lastLat),
-    longitude: roundCoord(simState.lastLng),
-    speed: simState.active ? 28.5 : 0,
-    heading: 25.0,
-    accuracy: 3.0,
-    timestamp: Date.now() / 1000,
-    age_seconds: 0.1,
-    status: 'active',
-    simulated: true
-  };
 }
 
 /**
  * Fetch overall status of the Pi 4B bridge and the Pi 3B Bus Announcer.
  *
- * @returns {Promise<{ success: boolean, bridge?: any, latest_gps?: any, pi3b?: any, online: boolean, simulated?: boolean, error?: string }>}
+ * @returns {Promise<{ success: boolean, bridge?: any, latest_gps?: any, pi3b?: any, online: boolean, error?: string }>}
  */
 export async function fetchBridgeStatus() {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
+    const timeout = setTimeout(() => controller.abort(), 3000);
 
     const response = await fetch(`${getBridgeBaseUrl()}/api/status`, {
       signal: controller.signal,
     });
     clearTimeout(timeout);
 
-    if (response.ok) {
-      const data = await response.json().catch(() => ({}));
-      const isOnline = Boolean(data.pi3b_online ?? (data.pi3b && !data.pi3b.error && data.pi3b.online !== false));
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
       return {
-        success: true,
-        bridge: data.bridge,
-        latest_gps: data.latest_gps,
-        pi3b: data.pi3b,
-        online: isOnline,
-        simulated: false
+        success: false,
+        online: false,
+        error: data.error || `Bridge returned HTTP ${response.status}`,
       };
     }
-  } catch (_) {}
 
-  return {
-    success: true,
-    online: true,
-    simulated: true,
-    pi3b: {
-      online: true,
-      active: simState.active,
-      trip: simState.active ? simState.direction : null,
-      stops: ROUTE4_STOPS.map((s) => s.name),
-      current_idx: simState.current_idx,
-      idx: simState.idx,
-      simulated: true
-    },
-    latest_gps: {
-      latitude: roundCoord(simState.lastLat),
-      longitude: roundCoord(simState.lastLng),
-      fix: true,
-      lost: false,
-      speed: simState.active ? 28.5 : 0,
-      simulated: true
-    }
-  };
+    const isOnline = Boolean(data.pi3b_online ?? (data.pi3b && !data.pi3b.error && data.pi3b.online !== false));
+
+    return {
+      success: true,
+      bridge: data.bridge,
+      latest_gps: data.latest_gps,
+      pi3b: data.pi3b,
+      online: isOnline,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      online: false,
+      error: err.message || 'Bridge unreachable',
+    };
+  }
 }

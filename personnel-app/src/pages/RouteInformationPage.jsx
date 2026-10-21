@@ -126,7 +126,6 @@ export function RouteInformationPage() {
         setAnnouncerInfo(prev => ({
           ...prev,
           online: false,
-          simulated: false,
           checking: false,
           lastCheck: Date.now(),
           state: null
@@ -136,7 +135,6 @@ export function RouteInformationPage() {
 
       setAnnouncerInfo({
         online: true,
-        simulated: Boolean(state.simulated),
         checking: false,
         lastCheck: Date.now(),
         state
@@ -449,7 +447,7 @@ export function RouteInformationPage() {
       heading: fix.heading || null,
       error: null,
       lastUpdated: new Date(),
-      source: fix.simulated ? 'pi3b_simulated' : 'pi3b_udp'
+      source: 'pi3b_udp'
     });
 
     // Broadcast position to Supabase & passenger app
@@ -927,8 +925,7 @@ export function RouteInformationPage() {
 
     if (bridgeRes.ok || bridgeRes.success) {
       const displayedTrip = forceNewTrip ? tripCount + 1 : tripCount;
-      const simTag = bridgeRes.simulated ? ' (Simulated Pi 3B)' : ' Pi 3B Announcer active.';
-      setStatusMessage(`✓ Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}.${simTag}`);
+      setStatusMessage(`✓ Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. Pi 3B Announcer active.`);
     } else if (bridgeRes.conflict || bridgeRes.status === 409) {
       // Rule 1: 409 a trip is already active (treat as "already running")
       setIsTripActive(true);
@@ -949,10 +946,9 @@ export function RouteInformationPage() {
     const bridgeRes = await sendTripEnd();
 
     if (bridgeRes.ok || bridgeRes.success) {
-      const simTag = bridgeRes.simulated ? ' (Simulated Pi 3B)' : '';
-      setStatusMessage(`✓ Trip ended. Pi 3B Announcer set to standby.${simTag}`);
+      setStatusMessage('✓ Trip ended. Pi 3B Announcer set to standby.');
     } else {
-      setStatusMessage(`Trip ended locally. (${bridgeRes.error || 'Standby'})`);
+      setStatusMessage(`Trip ended. (${bridgeRes.error || 'Standby'})`);
     }
 
     // Prompt to alight any remaining onboard passengers
@@ -1190,23 +1186,33 @@ export function RouteInformationPage() {
                 </span>
                 {announcerInfo.online ? (
                   <span
-                    className="badge"
+                    className="badge badge-success"
                     style={{
                       fontSize: '0.72rem',
                       padding: '0.15rem 0.5rem',
                       display: 'inline-flex',
                       alignItems: 'center',
-                      gap: '0.25rem',
-                      backgroundColor: announcerInfo.simulated ? 'rgba(59, 130, 246, 0.15)' : 'rgba(16, 185, 129, 0.15)',
-                      color: announcerInfo.simulated ? '#60a5fa' : '#34d399',
-                      border: `1px solid ${announcerInfo.simulated ? '#3b82f6' : '#10b981'}`
+                      gap: '0.25rem'
                     }}
-                    title={announcerInfo.simulated ? 'Pi 3B Announcer running in Simulation Mode' : 'Pi 3B Bus Announcer is connected and responsive'}
+                    title="Pi 3B Bus Announcer is connected and responsive"
                   >
-                    <Volume2 size={12} /> {announcerInfo.simulated ? '🎮 Pi 3B (Simulated)' : '✓ Pi 3B Announcer Online'}
+                    <Volume2 size={12} /> ✓ Pi 3B Announcer Online
                   </span>
                 ) : (
-                  <span className="badge" style={{ fontSize: '0.72rem', padding: '0.15rem 0.5rem', backgroundColor: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid #ef4444', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }} title="Pi 3B Announcer unreachable or bridge offline">
+                  <span
+                    className="badge"
+                    style={{
+                      fontSize: '0.72rem',
+                      padding: '0.15rem 0.5rem',
+                      backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                      color: '#f87171',
+                      border: '1px solid #ef4444',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.25rem'
+                    }}
+                    title="Pi 3B Announcer unreachable or bridge offline"
+                  >
                     <VolumeX size={12} /> Pi 3B Announcer Offline
                   </span>
                 )}
@@ -1219,18 +1225,18 @@ export function RouteInformationPage() {
                     alignItems: 'center',
                     gap: '0.25rem',
                     backgroundColor: deviceGps.active
-                      ? (deviceGps.source === 'pi3b_simulated' ? 'rgba(59, 130, 246, 0.15)' : 'rgba(16, 185, 129, 0.15)')
+                      ? 'rgba(16, 185, 129, 0.15)'
                       : (deviceGps.error === 'GPS lost' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(245, 158, 11, 0.15)'),
                     color: deviceGps.active
-                      ? (deviceGps.source === 'pi3b_simulated' ? '#60a5fa' : '#34d399')
+                      ? '#34d399'
                       : (deviceGps.error === 'GPS lost' ? '#f87171' : '#f59e0b'),
-                    border: `1px solid ${deviceGps.active ? (deviceGps.source === 'pi3b_simulated' ? '#3b82f6' : '#10b981') : (deviceGps.error === 'GPS lost' ? '#ef4444' : '#f59e0b')}`
+                    border: `1px solid ${deviceGps.active ? '#10b981' : (deviceGps.error === 'GPS lost' ? '#ef4444' : '#f59e0b')}`
                   }}
                   title={deviceGps.active ? `Live GPS position broadcasting to passenger app: ${deviceGps.latitude?.toFixed(5)}, ${deviceGps.longitude?.toFixed(5)}` : (deviceGps.error || 'Acquiring GPS fix')}
                 >
                   <MapPin size={12} />
                   {deviceGps.active
-                    ? `🛰️ Live GPS Active${deviceGps.source === 'pi3b_simulated' ? ' (Simulated)' : ''} (${deviceGps.speed ? `${deviceGps.speed.toFixed(1)} km/h` : 'Locked'})`
+                    ? `🛰️ Live GPS Active (${deviceGps.speed ? `${deviceGps.speed.toFixed(1)} km/h` : 'Locked'})`
                     : (deviceGps.error === 'GPS lost' ? '🛰️ GPS: Lost (>5s)' : (deviceGps.error ? `🛰️ GPS: ${deviceGps.error}` : '🛰️ GPS: Acquiring...'))}
                 </span>
                 <button
