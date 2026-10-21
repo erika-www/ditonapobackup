@@ -1,0 +1,70 @@
+{
+  "gps": {
+    "port": "/dev/ttyACM0",
+    "baud": 9600,
+    "max_speed_mps": 45
+  },
+  "pi4b": {
+  "host": "192.168.10.4",
+  "port": 5005,
+  "format": "json",
+  "send_hz": 1
+  },
+  "laptop": {
+    "host": "192.168.1.100",
+    "port": 5006,
+    "enabled": true
+  },
+  "api": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "allow_from": ["10.42.0.0/24", "10.10.10.0/24", "192.168.10.0/24", "192.168.1.0/24", "127.0.0.1/32"]
+  },
+  "thresholds": {
+    "approach_m": 140,
+    "arrive_m": 5,
+    "depart_extra_m": 15,
+    "pass_margin_m": 50
+  },
+  "reminders": {
+    "enabled": true,
+    "interval_s": 120,
+    "suppress_within_m": 150
+  },
+  "audio": {
+    "dir": "audio_own",
+    "volume": 1.0,
+    "gap_between_languages_s": 0.4,
+    "banner_min_s": 4,
+    "approach_to_here_gap_s": 10,
+    "here_to_next_gap_s": 2
+  },
+  "text": {
+    "approaching": {
+      "tl": "Paparating na po sa {stop}",
+      "en": "We are now approaching {stop}"
+    },
+    "here": {
+      "tl": "Dito na po tayo sa {stop}",
+      "en": "We are now here at {stop}"
+    },
+    "next": {
+      "tl": "Ang susunod na bus stop ay {stop}",
+      "en": "The next bus stop will be {stop}"
+    }
+  },
+  "audio_phrases": {
+    "approaching": {"tl": "Paparating na sa", "en": "We are now approaching"},
+    "here": {"tl": "Dito na po tayo sa", "en": "We are now at"},
+    "next": {"tl": "Ang susunod na istasyon ay", "en": "The next bus stop will be"}
+  },
+  "display": {
+    "fullscreen": true,
+    "width": 800,
+    "height": 480,
+    "fps": 5,
+    "theme": "auto",
+    "day_start_h": 6,
+    "day_end_h": 18
+  }
+}

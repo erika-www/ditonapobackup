@@ -1,0 +1,45 @@
+erDiagram
+  AUTH_USERS ||--o| PROFILES : profile
+  ROUTES o|--o{ STOPS : contains
+  ROUTES ||--o{ TRIPS : schedules
+  BUSES ||--o{ TRIPS : operates
+  OPERATIONS_PERSONNEL o|--o{ TRIPS : driver
+  OPERATIONS_PERSONNEL o|--o{ TRIPS : conductor
+  OPERATIONS_PERSONNEL o|--o{ TRIPS : dispatcher
+  PROFILES o|--o{ PASSENGER_JOURNEYS : owns
+  TRIPS o|--o{ PASSENGER_JOURNEYS : assigned
+  TRIPS ||--o{ BOARDING_EVENTS : records
+  BUSES ||--o{ BOARDING_EVENTS : vehicle
+  PROFILES o|--o{ BOARDING_EVENTS : passenger
+  PROFILES o|--o{ BOARDING_EVENTS : recorded_by
+  PASSENGER_JOURNEYS o|--o{ BOARDING_EVENTS : journey
+  BUSES ||--o{ DEVICE_KEYS : authenticates
+  BUSES ||--o{ BUS_LOCATIONS : history
+  BUSES ||--o| BUS_CURRENT_LOCATION : latest
+  BUSES ||--o{ BUS_COMMANDS : receives
+  TRIPS {
+    uuid id PK
+    uuid bus_id FK
+    uuid route_id FK
+    text status
+    text driver_personnel_id FK
+    text conductor_personnel_id FK
+    text dispatcher_personnel_id FK
+  }
+  PASSENGER_JOURNEYS {
+    uuid id PK
+    uuid passenger_id FK "nullable in latest migrations"
+    uuid trip_id FK "nullable"
+    text qr_token
+    integer passenger_count
+    text status
+  }
+  BOARDING_EVENTS {
+    uuid id PK
+    uuid trip_id FK
+    uuid bus_id FK
+    uuid journey_id FK
+    text event_type
+    text idempotency_key
+    boolean is_reversed
+  }

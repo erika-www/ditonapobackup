@@ -1,0 +1,27 @@
+[
+  {
+    "file": "01-system-architecture",
+    "title": "System Architecture",
+    "subtitle": "Web applications, cloud services, and onboard hardware \u2014 connections found in the archive."
+  },
+  {
+    "file": "02-process-passenger-boarding",
+    "title": "Process Diagram \u00b7 Passenger Journey & Boarding",
+    "subtitle": "From journey planning and QR issuance to boarding, alighting, and feedback."
+  },
+  {
+    "file": "03-process-gps-announcements",
+    "title": "Process Diagram \u00b7 GPS Tracking & Announcements",
+    "subtitle": "One accepted GPS fix feeds an onboard state machine and a separate cloud tracking path."
+  },
+  {
+    "file": "04-software-component-design",
+    "title": "Software Design \u00b7 Components & Dependencies",
+    "subtitle": "Module responsibilities and dependency direction, grouped by application."
+  },
+  {
+    "file": "05-software-data-design",
+    "title": "Software Design \u00b7 Core Data Relationships",
+    "subtitle": "Selected Supabase entities and relationships verified in SQL migrations; fields are abbreviated."
+  }
+]

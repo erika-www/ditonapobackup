@@ -1,0 +1,23 @@
+flowchart TB
+  subgraph Passenger
+    A[Select origin, destination and direction] --> B[Enter category and companions]
+    B --> C[Generate pass ID and QR payload]
+    C --> D[Save planned journey: Supabase or local test fallback]
+    D --> E[Display or download QR pass]
+  end
+  subgraph Personnel
+    F[Start or resume duty trip; bus and staff assignment] --> G[Start announcer through local bridge]
+    G --> H[Scan QR or enter pass code]
+    E --> H
+    H --> I{Active trip, recognized pass and valid direction?}
+    I -->|No| X[Show error]
+    I -->|Yes| J{Already boarded?}
+    J -->|No| K{Boarding capacity checks pass?}
+    K -->|No| X
+    K -->|Yes| L[Record board event; mark journey boarded]
+    J -->|Yes| M[Record alight event; mark journey completed]
+  end
+  L --> N[Update occupancy and refresh registry]
+  M --> N
+  N --> O[Passenger app receives status, location and seat updates]
+  O --> P[Journey history and feedback]

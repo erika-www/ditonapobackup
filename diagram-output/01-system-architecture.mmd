@@ -1,0 +1,44 @@
+flowchart TB
+  subgraph WEB[Web applications]
+    P[Passenger app: React + Vite]
+    O[Personnel and admin app: React + Vite]
+    S[Shared stops, direction validation, QR utilities]
+    RF[Offline Random Forest training] --> AS[Static prediction assets]
+    AS --> S
+    P --> S
+    O --> S
+    P --> MAP[Leaflet / OpenStreetMap; optional Google ETA]
+  end
+  subgraph CLOUD[Supabase]
+    A[Auth and profiles]
+    D[Data API and RPC]
+    DB[(PostgreSQL operational database)]
+    RT[Realtime]
+    E[ingest-gps Edge Function]
+    C[bus-direction Edge Function]
+    A --> DB
+    D --> DB
+    E --> DB
+    C --> DB
+    DB --> RT
+  end
+  P --> A
+  O --> A
+  P --> D
+  O --> D
+  RT --> P
+  RT --> O
+  subgraph BUS[Onboard bus]
+    G[USB GPS receiver] -->|Serial NMEA| PI3[Pi 3B: GPSReader, TripTracker, AudioManager, DisplayState]
+    PI3 --> AUDIO[Speaker and screen]
+    PI3 -->|UDP JSON| PI4[Pi 4B bridge]
+    PI4 -->|HTTP trip control| PI3
+  end
+  O -->|Local HTTP bridge| PI4
+  PI4 -->|HTTPS GPS upload| E
+  PI4 -.->|Poll cloud commands| C
+  subgraph REST[Additional REST backend]
+    F[FastAPI routers + Pydantic + SQLAlchemy] --> SQL[(Configured DATABASE_URL)]
+  end
+  P -.->|api.js REST client| F
+  O -.->|api.js REST client| F

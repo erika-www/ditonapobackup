@@ -1,0 +1,11 @@
+{
+  "installCommand": "cd passenger-app && npm ci",
+  "buildCommand": "cd passenger-app && npm run build",
+  "outputDirectory": "passenger-app/dist",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

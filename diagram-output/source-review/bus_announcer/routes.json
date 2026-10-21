@@ -1,0 +1,219 @@
+{
+ "Northbound": {
+  "label": "QC Hall Interchange → SB Road",
+  "stops": [
+   {
+    "id": "qc_hall_a",
+    "name": "Quezon City Hall – NHA Interchange",
+    "lat": 14.650221,
+    "lon": 121.052022,
+    "audio": "qc_hall",
+    "say": "Quezon City Hall – N H A Interchange"
+   },
+   {
+    "id": "north_ave_vertis_a",
+    "name": "North Avenue – Veterans Hospital / Vertis North",
+    "lat": 14.653838,
+    "lon": 121.039194,
+    "audio": "north_ave_vertis"
+   },
+   {
+    "id": "mindanao_road1_a",
+    "name": "Mindanao Avenue corner Road 1",
+    "lat": 14.655659,
+    "lon": 121.03557,
+    "audio": "mindanao_road1"
+   },
+   {
+    "id": "tullahan_bridge_a",
+    "name": "Mindanao Avenue – Tullahan Bridge",
+    "lat": 14.661252,
+    "lon": 121.036818,
+    "audio": "tullahan_bridge"
+   },
+   {
+    "id": "congressional_a",
+    "name": "Mindanao Avenue corner Congressional Avenue",
+    "lat": 14.668691,
+    "lon": 121.033582,
+    "audio": "congressional"
+   },
+   {
+    "id": "tandang_sora_a",
+    "name": "Mindanao Avenue corner Tandang Sora Avenue",
+    "lat": 14.677455,
+    "lon": 121.032212,
+    "audio": "tandang_sora"
+   },
+   {
+    "id": "d_munoz_a",
+    "name": "Mindanao Avenue corner D. Muñoz Street",
+    "lat": 14.681691,
+    "lon": 121.032145,
+    "audio": "d_munoz"
+   },
+   {
+    "id": "old_sauyo_a",
+    "name": "Mindanao Avenue corner Old Sauyo Road",
+    "lat": 14.688344,
+    "lon": 121.030957,
+    "audio": "old_sauyo"
+   },
+   {
+    "id": "quirino_interchange_a",
+    "name": "Mindanao Avenue corner Quirino Highway – Interchange",
+    "lat": 14.69039,
+    "lon": 121.028383,
+    "audio": "quirino_interchange"
+   },
+   {
+    "id": "qcu_novaliches_hospital_a",
+    "name": "Quezon City University Main Campus / Novaliches District Hospital",
+    "lat": 14.700148,
+    "lon": 121.034649,
+    "audio": "qcu_novaliches_hospital"
+   },
+   {
+    "id": "sm_novaliches_a",
+    "name": "Quirino Highway – SM City Novaliches",
+    "lat": 14.707175,
+    "lon": 121.03884,
+    "audio": "sm_novaliches"
+   },
+   {
+    "id": "forest_hills_a",
+    "name": "Quirino Highway corner Forest Hills Drive",
+    "lat": 14.716621,
+    "lon": 121.04029,
+    "audio": "forest_hills"
+   },
+   {
+    "id": "gen_luis_bayan_a",
+    "name": "General Luis Avenue – Novaliches Bayan",
+    "lat": 14.721925,
+    "lon": 121.039098,
+    "audio": "gen_luis_bayan"
+   },
+   {
+    "id": "gen_luis_banahaw_a",
+    "name": "General Luis Avenue corner Banahaw Street",
+    "lat": 14.720656,
+    "lon": 121.028112,
+    "audio": "gen_luis_banahaw"
+   },
+   {
+    "id": "sb_road_a",
+    "name": "General Luis Avenue corner SB Road",
+    "lat": 14.71977,
+    "lon": 121.02129,
+    "audio": "sb_road",
+    "say": "General Luis Avenue corner S B Road"
+   }
+  ]
+ },
+ "Southbound": {
+  "label": "SB Road → QC Hall Interchange",
+  "stops": [
+   {
+    "id": "sb_road_b",
+    "name": "General Luis Avenue corner SB Road",
+    "lat": 14.719235,
+    "lon": 121.021188,
+    "audio": "sb_road",
+    "say": "General Luis Avenue corner S B Road"
+   },
+   {
+    "id": "gen_luis_banahaw_b",
+    "name": "General Luis Avenue corner Banahaw Street",
+    "lat": 14.720523,
+    "lon": 121.028285,
+    "audio": "gen_luis_banahaw"
+   },
+   {
+    "id": "gen_luis_bayan_b",
+    "name": "General Luis Avenue – Novaliches Bayan",
+    "lat": 14.721039,
+    "lon": 121.038818,
+    "audio": "gen_luis_bayan"
+   },
+   {
+    "id": "forest_hills_b",
+    "name": "Quirino Highway corner Forest Hills Drive",
+    "lat": 14.716601,
+    "lon": 121.040314,
+    "audio": "forest_hills"
+   },
+   {
+    "id": "sm_novaliches_b",
+    "name": "Quirino Highway – SM City Novaliches",
+    "lat": 14.707498,
+    "lon": 121.038684,
+    "audio": "sm_novaliches"
+   },
+   {
+    "id": "qcu_novaliches_hospital_b",
+    "name": "Quezon City University Main Campus / Novaliches District Hospital",
+    "lat": 14.700050,
+    "lon": 121.034451,
+    "audio": "qcu_novaliches_hospital"
+   },
+   {
+    "id": "old_sauyo_b",
+    "name": "Mindanao Avenue corner Old Sauyo Road",
+    "lat": 14.687921,
+    "lon": 121.030957,
+    "audio": "old_sauyo"
+   },
+   {
+    "id": "d_munoz_b",
+    "name": "Mindanao Avenue corner D. Muñoz Street",
+    "lat": 14.681759,
+    "lon": 121.031850,
+    "audio": "d_munoz"
+   },
+   {
+    "id": "tandang_sora_b",
+    "name": "Mindanao Avenue corner Tandang Sora Avenue",
+    "lat": 14.67747181781164,
+    "lon": 121.03200365553315,
+    "audio": "tandang_sora"
+   },
+   {
+    "id": "congressional_b",
+    "name": "Mindanao Avenue corner Congressional Avenue",
+    "lat": 14.668915,
+    "lon": 121.033008,
+    "audio": "congressional"
+   },
+   {
+    "id": "tullahan_bridge_b",
+    "name": "Mindanao Avenue – Tullahan Bridge",
+    "lat": 14.663600,
+    "lon": 121.036382,
+    "audio": "tullahan_bridge"
+   },
+   {
+    "id": "mindanao_road1_b",
+    "name": "Mindanao Avenue corner Road 1",
+    "lat": 14.655876,
+    "lon": 121.035284,
+    "audio": "mindanao_road1"
+   },
+   {
+    "id": "north_ave_vertis_b",
+    "name": "North Avenue – Veterans Hospital / Vertis North",
+    "lat": 14.651470,
+    "lon": 121.036283,
+    "audio": "north_ave_vertis"
+   },
+   {
+    "id": "qc_hall_b",
+    "name": "Quezon City Hall – NHA Interchange",
+    "lat": 14.650220638010133,
+    "lon": 121.05202242497576,
+    "audio": "qc_hall",
+    "say": "Quezon City Hall – N H A Interchange"
+   }
+  ]
+ }
+}

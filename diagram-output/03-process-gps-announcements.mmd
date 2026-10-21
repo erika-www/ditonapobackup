@@ -1,0 +1,25 @@
+flowchart TB
+  A[Read serial GPS / NMEA] --> B{Valid fix and accepted by jump filter?}
+  B -->|No| W[Wait for next fix]
+  B -->|Yes| C[Update GPS display]
+  C --> D{Trip active?}
+  D -->|No| W
+  D -->|Yes| E[Calculate Haversine distance to next stop]
+  E --> F[waiting: enter approach radius]
+  F --> G[approaching: announce approaching except at first stop]
+  G --> H{Inside arrival radius?}
+  H -->|Yes| I[at_stop: announce here]
+  H -->|No, distance exceeds minimum plus pass margin| N[Advance to next stop]
+  H -->|No, still approaching| E
+  I --> J{Final stop?}
+  J -->|Yes| K[Emit trip_complete and return idle]
+  J -->|No, bus departs| N
+  N --> L[Emit next announcement and set phase waiting]
+  L --> E
+  B -->|Accepted coordinates| U[Send UDP JSON to Pi 4B bridge]
+  U --> V[HTTPS POST to ingest-gps]
+  V --> Q{Device key, rate limit, coordinates and timestamp valid?}
+  Q -->|No| R[Return error]
+  Q -->|Yes| S[Insert bus_locations history]
+  S --> T[Upsert bus_current_location]
+  T --> Z[Realtime and polling update maps]

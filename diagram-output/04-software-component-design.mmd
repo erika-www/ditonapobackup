@@ -1,0 +1,32 @@
+flowchart TB
+  PUI[Passenger UI: App, AuthContext, StartTripInterface, InteractiveMap, StopQueuePredictor]
+  OUI[Personnel UI: ProtectedRoute, AuthContext, RouteInformationPage, PassengerCheckInPage, Admin pages]
+  PS[Passenger services: supabaseClient, api.js, geoUtils, QR generator, googleMapsService]
+  OS[Personnel services: supabaseClient, api.js, busAnnouncerBridge, pdfReportGenerator]
+  SH[Shared: route4Stops, qrPassUtils, queueAndBoardingService]
+  PUI --> PS
+  OUI --> OS
+  PUI --> SH
+  OUI --> SH
+  TRAIN[train_random_forest.py] --> AS[shared/data/rfPredictions.js]
+  AS --> SH
+  PS --> SB[Supabase Auth, Data API, RPC and Realtime]
+  OS --> SB
+  PS -.-> FAST[FastAPI v1 routers and dependencies]
+  OS -.-> FAST
+  FAST --> SC[Pydantic schemas]
+  FAST --> ORM[SQLAlchemy models and database session]
+  ORM --> DB[(Configured SQL database)]
+  OS --> BR[Pi 4B bridge.py]
+  MAIN[Pi 3B main.py] --> GPS[GPSReader + jump_filter]
+  GPS --> TRACK[TripTracker]
+  TRACK --> AUDIO[AudioManager]
+  TRACK --> DISP[DisplayState]
+  DISP --> SCREEN[Screen]
+  GPS --> SEND[Pi4Sender]
+  SEND -->|UDP| BR
+  BR -->|HTTP| WEB[Pi 3B web.py API]
+  WEB --> TRACK
+  BR --> EDGE[ingest-gps / bus-direction Edge Functions]
+  EDGE --> SDB[(Supabase PostgreSQL)]
+  SB --> SDB
