@@ -5,7 +5,8 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
-import { Camera, X, RefreshCw, CheckCircle2, AlertCircle, Volume2 } from 'lucide-react';
+import { Camera, X, RefreshCw, CheckCircle2, AlertCircle, Volume2, Sparkles } from 'lucide-react';
+import { createPassengerQrPayload, generateDailyTripId } from '@shared/qrPassUtils';
 
 function playBeep() {
   try {
@@ -195,6 +196,19 @@ export function QrCameraScannerModal({
 
   const toggleCameraFacing = () => {
     setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'));
+  };
+
+  const simulateScanPass = (category = 'Regular', count = 1, toStop = 'Mindanao Avenue corner Congressional Avenue') => {
+    const payload = createPassengerQrPayload({
+      tripId: generateDailyTripId(),
+      category,
+      count,
+      boardingStop: 'Quezon City Hall – NHA Interchange',
+      destinationStop: toStop,
+      direction: 'Northbound',
+      busPlate: 'QC-BUS'
+    });
+    handleDetectedCode(payload);
   };
 
   const handleManualSubmit = (e) => {
@@ -397,6 +411,47 @@ export function QrCameraScannerModal({
               style={{ fontSize: '.75rem', padding: '.3rem .6rem' }}
             >
               {showManual ? 'Hide Manual' : 'Type Code'}
+            </button>
+          </div>
+        </div>
+
+        {/* Quick Test Pass Simulation Buttons for Desktop / Testing */}
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.35rem',
+          padding: '0.5rem',
+          backgroundColor: 'rgba(255, 255, 255, 0.03)',
+          borderRadius: '8px',
+          border: '1px dashed #334155'
+        }}>
+          <span style={{ fontSize: '.7rem', color: '#94a3b8', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '.3rem' }}>
+            <Sparkles size={12} color="#38bdf8" /> Quick Test QR Passes (Click to Simulate Scan):
+          </span>
+          <div style={{ display: 'flex', gap: '.4rem', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={() => simulateScanPass('Regular', 1, 'Mindanao Avenue corner Congressional Avenue')}
+              className="btn btn-secondary"
+              style={{ fontSize: '.72rem', padding: '.25rem .55rem', backgroundColor: 'rgba(6, 182, 212, 0.15)', borderColor: '#06b6d4', color: '#38bdf8' }}
+            >
+              + Regular (Stop 1 → Stop 5)
+            </button>
+            <button
+              type="button"
+              onClick={() => simulateScanPass('Senior Citizen', 1, 'Quirino Highway – SM City Novaliches')}
+              className="btn btn-secondary"
+              style={{ fontSize: '.72rem', padding: '.25rem .55rem', backgroundColor: 'rgba(245, 158, 11, 0.15)', borderColor: '#f59e0b', color: '#fbbf24' }}
+            >
+              + Priority Senior (Stop 1 → Stop 11)
+            </button>
+            <button
+              type="button"
+              onClick={() => simulateScanPass('Regular', 3, 'General Luis Avenue corner SB Road')}
+              className="btn btn-secondary"
+              style={{ fontSize: '.72rem', padding: '.25rem .55rem', backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: '#10b981', color: '#34d399' }}
+            >
+              + Group 3 pax (Stop 1 → Stop 15)
             </button>
           </div>
         </div>
