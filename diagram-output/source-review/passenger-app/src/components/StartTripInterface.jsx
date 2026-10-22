@@ -200,6 +200,30 @@ export function StartTripInterface({
     ? SOUTHBOUND_ROUTE4_STOPS
     : (configuredRoute4Stops?.length ? configuredRoute4Stops : ROUTE4_STOPS);
 
+  // Available boarding stops (all stops except the terminus of the route direction)
+  const availableBoardingStops = currentStopsPool.slice(0, Math.max(1, currentStopsPool.length - 1));
+
+  // 0-based index of current boarding stop in the directional sequence
+  const startStopIndex = currentStopsPool.findIndex(st => st.id === startStop?.id || st.name === startStop?.name);
+
+  // Available alighting stops: ONLY stops that are ahead of startStop in the direction sequence
+  // This assesses if a stop has already been passed through and removes unavailable options to avoid confusion
+  const availableAlightingStops = currentStopsPool.filter((_, idx) => idx > (startStopIndex !== -1 ? startStopIndex : 0));
+
+  const handleStartStopChange = (stopId) => {
+    const s = currentStopsPool.find(st => st.id === stopId);
+    if (!s) return;
+    setStartStop(s);
+    const sIdx = currentStopsPool.findIndex(st => st.id === s.id);
+    const forwardStops = currentStopsPool.filter((_, idx) => idx > sIdx);
+    if (forwardStops.length > 0) {
+      const eIdx = currentStopsPool.findIndex(st => st.id === endStop?.id);
+      if (eIdx <= sIdx) {
+        setEndStop(forwardStops[0]);
+      }
+    }
+  };
+
   const handleDirectionChange = (newDir) => {
     setDirection(newDir);
     const pool = newDir === 'Southbound'
@@ -273,6 +297,111 @@ export function StartTripInterface({
     catch { return []; }
   });
   const visibleTripHistory = tripHistory.filter(item => !hiddenTripIds.includes(item.dbId || item.id));
+
+  // Dynamic Dashboard statistics calculated directly from existing passenger trip history
+  const dashboardStats = useMemo(() => {
+    const totalTrips = visibleTripHistory.length;
+
+    // Calculate total kilometers traveled based on trip stops
+    let calculatedKm = 0;
+    visibleTripHistory.forEach((t) => {
+      const from = resolveRoute4Stop(t.fromStop?.name || t.fromStop || t.origin_name);
+      const to = resolveRoute4Stop(t.toStop?.name || t.toStop || t.destination_name);
+      if (from?.lat && from?.lng && to?.lat && to?.lng) {
+        calculatedKm += calculateDistanceKm(from.lat, from.lng, to.lat, to.lng);
+      } else {
+        calculatedKm += 9.8;
+      }
+    });
+
+    const totalDistance = totalTrips === 0 ? '0.0' : calculatedKm.toFixed(1);
+
+    // Trips this month
+    const now = new Date();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+    const thisMonthCount = visibleTripHistory.filter((t) => {
+      const d = t.createdAt || t.created_at || t.date || t.startTime;
+      if (!d) return true;
+      const dateObj = new Date(d);
+      return !isNaN(dateObj.getTime()) && dateObj.getMonth() === currentMonth && dateObj.getFullYear() === currentYear;
+    }).length;
+
+    // Day of week distribution for weekly ridership frequency chart
+    const dayKeys = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const countsByDay = { Mon: 0, Tue: 0, Wed: 0, Thu: 0, Fri: 0, Sat: 0, Sun: 0 };
+
+    visibleTripHistory.forEach((t) => {
+      const d = t.createdAt || t.created_at || t.date || t.startTime;
+      const dateObj = d ? new Date(d) : null;
+      if (dateObj && !isNaN(dateObj.getTime())) {
+        const dayName = dayKeys[dateObj.getDay()];
+        if (countsByDay[dayName] !== undefined) countsByDay[dayName] += 1;
+      } else {
+        countsByDay['Mon'] += 1;
+      }
+    });
+
+    const maxDayCount = Math.max(1, ...Object.values(countsByDay));
+    const daysOrder = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+    let peakDay = 'None';
+    let peakCount = 0;
+    daysOrder.forEach((day) => {
+      if (countsByDay[day] > peakCount) {
+        peakCount = countsByDay[day];
+        peakDay = day;
+      }
+    });
+
+    const weeklyBars = daysOrder.map((day) => {
+      const count = countsByDay[day];
+      const isPeak = totalTrips > 0 && day === peakDay && count > 0;
+      return {
+        day,
+        count,
+        height: totalTrips > 0 && count > 0 ? Math.max(15, Math.round((count / maxDayCount) * 100)) : 10,
+        color: isPeak ? '#10b981' : (day === 'Sat' || day === 'Sun' ? '#06b6d4' : '#8b5cf6'),
+        peak: isPeak
+      };
+    });
+
+    // Top Visited Stops
+    const stopCountMap = {};
+    visibleTripHistory.forEach((t) => {
+      const fromName = t.fromStop?.name || t.fromStop || t.origin_name;
+      const toName = t.toStop?.name || t.toStop || t.destination_name;
+      if (fromName) stopCountMap[fromName] = (stopCountMap[fromName] || 0) + 1;
+      if (toName) stopCountMap[toName] = (stopCountMap[toName] || 0) + 1;
+    });
+
+    const sortedStops = Object.entries(stopCountMap)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3);
+
+    const totalVisits = Object.values(stopCountMap).reduce((a, b) => a + b, 0) || 1;
+    const topStops = sortedStops.map(([name, count], index) => {
+      const resolved = resolveRoute4Stop(name);
+      return {
+        rank: index + 1,
+        stopNumber: resolved?.stopNumber || index + 1,
+        name: resolved?.name || name,
+        percent: Math.round((count / totalVisits) * 100),
+        count,
+        tag: index === 0 ? 'Primary Boarding Hub' : (index === 1 ? 'Top Commercial Destination' : 'Frequent Route Stop'),
+        color: index === 0 ? '#8b5cf6' : (index === 1 ? '#06b6d4' : '#10b981')
+      };
+    });
+
+    return {
+      totalTrips,
+      totalDistance,
+      thisMonthCount,
+      peakDayLabel: totalTrips > 0 && peakCount > 0 ? `Peak Day: ${peakDay} (${peakCount} Trip${peakCount > 1 ? 's' : ''})` : 'No commutes recorded yet',
+      weeklyBars,
+      topStops
+    };
+  }, [visibleTripHistory]);
   const busCapacity = Number(routeBusTrip?.bus?.capacity ?? occupancy?.bus_capacity) || 50;
   const currentOnboard = occupancy?.current_onboard == null ? null : Number(occupancy.current_onboard);
   const availableSeats = occupancy?.available_seats == null
@@ -319,21 +448,21 @@ export function StartTripInterface({
 
   const reachedStopNotice = useRef(false);
 
-  // Proximity detection for destination reached via bus location (5-meter radius: 0.005 km)
+  // Proximity detection for destination reached via bus location (25-meter radius: 0.025 km)
   useEffect(() => {
     if (!activeTrip || reachedStopNotice.current) return;
     const stop = activeTrip.toStop;
     if (stop?.lat && stop?.lng && liveBusCoords?.lat && liveBusCoords?.lng) {
       const distKm = calculateDistanceKm(liveBusCoords.lat, liveBusCoords.lng, stop.lat, stop.lng);
-      if (distKm <= 0.005) {
+      if (distKm <= 0.025) {
         reachedStopNotice.current = true;
         setDestinationReachedModalOpen(true);
-        onShowToast?.(`Your bus has reached destination: ${stop.name || stop} within 5m radius!`, 'stop-reached');
+        onShowToast?.(`Your bus has reached destination: ${stop.name || stop}!`, 'stop-reached');
       }
     }
   }, [activeTrip, liveBusCoords, onShowToast]);
 
-  // Proximity detection for destination reached via device GPS (5-meter radius: 0.005 km)
+  // Proximity detection for destination reached via device GPS (25-meter radius: 0.025 km)
   useEffect(() => {
     if (!activeTrip || reachedStopNotice.current) return;
     const stop = activeTrip.toStop;
@@ -343,10 +472,10 @@ export function StartTripInterface({
       (pos) => {
         if (!activeTrip || reachedStopNotice.current) return;
         const distKm = calculateDistanceKm(pos.coords.latitude, pos.coords.longitude, stop.lat, stop.lng);
-        if (distKm <= 0.005) {
+        if (distKm <= 0.025) {
           reachedStopNotice.current = true;
           setDestinationReachedModalOpen(true);
-          onShowToast?.(`You have reached your destination: ${stop.name || stop} within 5m radius!`, 'stop-reached');
+          onShowToast?.(`You have reached your destination: ${stop.name || stop}!`, 'stop-reached');
         }
       },
       () => {},
@@ -354,6 +483,67 @@ export function StartTripInterface({
     );
     return () => {
       navigator.geolocation.clearWatch(watchId);
+    };
+  }, [activeTrip, onShowToast]);
+
+  // Broadcast & Scanner Completion listener for instant arrival trigger
+  useEffect(() => {
+    if (!activeTrip || reachedStopNotice.current) return;
+    const destName = (activeTrip.toStop?.name || activeTrip.toStop || '').toLowerCase();
+
+    // 1. BroadcastChannel listener
+    let bc = null;
+    if (typeof window !== 'undefined' && window.BroadcastChannel) {
+      try {
+        bc = new BroadcastChannel('qcbus_live_channel');
+        bc.onmessage = (ev) => {
+          if (!activeTrip || reachedStopNotice.current) return;
+          const msg = ev.data;
+          if (!msg) return;
+
+          // Check if passenger alighted or stop arrived
+          if (msg.type === 'PASSENGERS_ALIGHTED_AT_STOP') {
+            const stopName = (msg.payload?.stopName || '').toLowerCase();
+            if (destName && stopName && (destName.includes(stopName) || stopName.includes(destName))) {
+              reachedStopNotice.current = true;
+              setDestinationReachedModalOpen(true);
+              onShowToast?.(`Your bus has arrived at: ${activeTrip.toStop?.name || activeTrip.toStop}!`, 'stop-reached');
+            }
+          } else if (msg.type === 'PASSENGER_ALIGHTED') {
+            const token = msg.payload?.token || msg.payload?.journeyId;
+            if (token && (token === activeTrip.id || token === activeTrip.dbId || token === activeTrip.dailyTripId)) {
+              reachedStopNotice.current = true;
+              setDestinationReachedModalOpen(true);
+              onShowToast?.(`Alighted successfully at ${activeTrip.toStop?.name || activeTrip.toStop}!`, 'stop-reached');
+            }
+          }
+        };
+      } catch (_) {}
+    }
+
+    // 2. Cookie / LocalStorage scanner status listener
+    const scanPoller = setInterval(() => {
+      if (!activeTrip || reachedStopNotice.current) return;
+      const keysToCheck = [activeTrip.id, activeTrip.dbId, activeTrip.dailyTripId].filter(Boolean);
+      for (const k of keysToCheck) {
+        try {
+          const raw = localStorage.getItem(`qcbus_scanned_${k}`);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed.status === 'completed') {
+              reachedStopNotice.current = true;
+              setDestinationReachedModalOpen(true);
+              onShowToast?.(`Destination reached: ${activeTrip.toStop?.name || activeTrip.toStop}!`, 'stop-reached');
+              break;
+            }
+          }
+        } catch (_) {}
+      }
+    }, 1500);
+
+    return () => {
+      if (bc) bc.close();
+      clearInterval(scanPoller);
     };
   }, [activeTrip, onShowToast]);
 
@@ -933,7 +1123,7 @@ export function StartTripInterface({
       } catch {}
       return nextRows;
     });
-    if (!currentTrip.localTest) setFeedbackTrip(currentTrip);
+    setFeedbackTrip(currentTrip);
     setActiveTrip(null);
     setStep('form');
     setDestinationReachedModalOpen(false);
@@ -1027,17 +1217,7 @@ export function StartTripInterface({
       {/* TAB 1: HOME & TRIP PLANNER */}
       {activeTab === 'home' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-      {feedbackTrip && <div className="glass-card" role="dialog" aria-modal="true" style={{ marginBottom: '1rem' }}>
-        <h2>How was your bus trip?</h2>
-        <label className="form-label" htmlFor="trip-rating">Rating</label>
-        <select id="trip-rating" className="form-select" value={feedbackRating} onChange={e => setFeedbackRating(Number(e.target.value))}>{[5,4,3,2,1].map(n => <option key={n} value={n}>{n} / 5</option>)}</select>
-        <label className="form-label" htmlFor="trip-feedback">Comments (optional)</label>
-        <textarea id="trip-feedback" className="form-select" rows="3" maxLength={1000} value={feedbackText} onChange={e => setFeedbackText(e.target.value)} />
-        <button type="button" className="btn-primary" onClick={async () => { const { submitJourneyFeedback } = await import('../services/supabaseClient'); const result = await submitJourneyFeedback(feedbackTrip.dbId, feedbackRating, feedbackText); if (!result.success) { onShowToast?.(result.error); return; } setFeedbackTrip(null); setFeedbackText(''); onShowToast?.('Thanks for your feedback!'); }}>Send feedback</button>
-        <button type="button" className="btn-secondary" style={{ marginLeft: '.5rem' }} onClick={() => setFeedbackTrip(null)}>Skip</button>
-      </div>}
-
-      {activeTrip && (
+          {activeTrip && (
             <div className="glass-card" style={{ borderLeft: '4px solid var(--secondary)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -1329,7 +1509,7 @@ export function StartTripInterface({
                           type="button"
                           className="btn-primary"
                           onClick={() => {
-                            setStartStop(detectedNearestStop.stop);
+                            handleStartStopChange(detectedNearestStop.stop.id);
                             setDetectedNearestStop(null);
                           }}
                         >
@@ -1357,15 +1537,14 @@ export function StartTripInterface({
                           if (e.target.value === 'detect') {
                             handleDetectNearestStop();
                           } else {
-                            const s = currentStopsPool.find(st => st.id === e.target.value);
-                            if (s) setStartStop(s);
+                            handleStartStopChange(e.target.value);
                           }
                         }}
                       >
                         <option value="detect" disabled={isDetectingLocation}>
                           {isDetectingLocation ? '⏳ Detecting Nearest Stop...' : '📍 Detect Nearest Stop'}
                         </option>
-                        {currentStopsPool.map((stop, idx) => (
+                        {availableBoardingStops.map((stop, idx) => (
                           <option key={stop.id} value={stop.id}>
                             Stop {stop.stopNumber || idx + 1}: {stop.name}
                           </option>
@@ -1377,18 +1556,22 @@ export function StartTripInterface({
                       <label className="form-label">{t.destinationStop} ({direction})</label>
                       <select
                         className="form-select"
-                        value={endStop.id}
-                        disabled={!!activeTrip}
+                        value={endStop?.id || ''}
+                        disabled={!!activeTrip || availableAlightingStops.length === 0}
                         onChange={(e) => {
                           const s = currentStopsPool.find(st => st.id === e.target.value);
                           if (s) setEndStop(s);
                         }}
                       >
-                        {currentStopsPool.map((stop, idx) => (
-                          <option key={stop.id} value={stop.id}>
-                            Stop {stop.stopNumber || idx + 1}: {stop.name}
-                          </option>
-                        ))}
+                        {availableAlightingStops.length === 0 ? (
+                          <option value="" disabled>No forward stops available</option>
+                        ) : (
+                          availableAlightingStops.map((stop) => (
+                            <option key={stop.id} value={stop.id}>
+                              Stop {stop.stopNumber}: {stop.name}
+                            </option>
+                          ))
+                        )}
                       </select>
                     </div>
                   </div>
@@ -1614,10 +1797,10 @@ export function StartTripInterface({
                 </div>
               </div>
               <div style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '0.2rem' }}>
-                {Math.max(visibleTripHistory.length, 14)} Trips
+                {dashboardStats.totalTrips} {dashboardStats.totalTrips === 1 ? 'Trip' : 'Trips'}
               </div>
               <div style={{ fontSize: '0.75rem', color: '#10b981', display: 'flex', alignItems: 'center', gap: '0.25rem', fontWeight: 600 }}>
-                <TrendingUp size={13} /> +4 trips this month on Route 4
+                <TrendingUp size={13} /> {dashboardStats.thisMonthCount} {dashboardStats.thisMonthCount === 1 ? 'commute' : 'commutes'} this month on Route 4
               </div>
             </div>
 
@@ -1630,10 +1813,10 @@ export function StartTripInterface({
                 </div>
               </div>
               <div style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '0.2rem' }}>
-                ~{(Math.max(visibleTripHistory.length, 14) * 9.8).toFixed(1)} km
+                ~{dashboardStats.totalDistance} km
               </div>
               <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                Traversed along 15 Route 4 Stops
+                Traversed along Route 4 Stops
               </div>
             </div>
           </div>
@@ -1650,7 +1833,7 @@ export function StartTripInterface({
                 </p>
               </div>
               <span className="badge badge-info" style={{ fontSize: '0.75rem' }}>
-                Peak Day: Wednesday (6 Trips)
+                {dashboardStats.peakDayLabel}
               </span>
             </div>
 
@@ -1664,15 +1847,7 @@ export function StartTripInterface({
               borderBottom: '2px solid var(--border-color)',
               gap: '0.75rem'
             }}>
-              {[
-                { day: 'Mon', count: 4, height: 65, color: '#8b5cf6' },
-                { day: 'Tue', count: 3, height: 50, color: '#8b5cf6' },
-                { day: 'Wed', count: 6, height: 100, color: '#10b981', peak: true },
-                { day: 'Thu', count: 3, height: 50, color: '#8b5cf6' },
-                { day: 'Fri', count: 5, height: 82, color: '#8b5cf6' },
-                { day: 'Sat', count: 2, height: 35, color: '#06b6d4' },
-                { day: 'Sun', count: 1, height: 20, color: '#06b6d4' }
-              ].map((bar) => (
+              {dashboardStats.weeklyBars.map((bar) => (
                 <div key={bar.day} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%', justifyContent: 'flex-end' }}>
                   <span style={{ fontSize: '0.75rem', fontWeight: 700, color: bar.peak ? '#10b981' : 'var(--text-muted)', marginBottom: '0.35rem' }}>
                     {bar.count}
@@ -1746,49 +1921,30 @@ export function StartTripInterface({
               </h2>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
-                {[
-                  {
-                    rank: 1,
-                    stopNumber: 1,
-                    name: 'Quezon City Hall – NHA Interchange',
-                    percent: 46,
-                    tag: 'Primary Boarding Hub',
-                    color: '#8b5cf6'
-                  },
-                  {
-                    rank: 2,
-                    stopNumber: 11,
-                    name: 'Quirino Highway – SM City Novaliches',
-                    percent: 32,
-                    tag: 'Top Commercial Destination',
-                    color: '#06b6d4'
-                  },
-                  {
-                    rank: 3,
-                    stopNumber: 15,
-                    name: 'General Luis Avenue corner SB Road',
-                    percent: 22,
-                    tag: 'North Terminal Anchor',
-                    color: '#10b981'
-                  }
-                ].map((item) => (
-                  <div key={item.stopNumber} style={{ backgroundColor: 'var(--bg-subtle)', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                        <span style={{ fontSize: '0.72rem', fontWeight: 800, padding: '0.15rem 0.4rem', borderRadius: '4px', background: item.color, color: '#fff' }}>
-                          STOP {item.stopNumber}
-                        </span>
-                        <strong style={{ fontSize: '0.88rem', color: 'var(--text-primary)' }}>{item.name}</strong>
-                      </div>
-                      <span style={{ fontSize: '0.85rem', fontWeight: 800, color: item.color }}>{item.percent}%</span>
-                    </div>
-                    {/* Progress Bar */}
-                    <div style={{ height: '6px', width: '100%', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: '3px', overflow: 'hidden', marginTop: '0.4rem' }}>
-                      <div style={{ width: `${item.percent}%`, height: '100%', backgroundColor: item.color, borderRadius: '3px' }} />
-                    </div>
-                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', display: 'block', marginTop: '0.25rem' }}>{item.tag}</span>
+                {dashboardStats.topStops.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '1.5rem', color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
+                    No commute history recorded yet. Complete trips to see your top visited stops!
                   </div>
-                ))}
+                ) : (
+                  dashboardStats.topStops.map((item) => (
+                    <div key={item.name} style={{ backgroundColor: 'var(--bg-subtle)', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <span style={{ fontSize: '0.72rem', fontWeight: 800, padding: '0.15rem 0.4rem', borderRadius: '4px', background: item.color, color: '#fff' }}>
+                            STOP {item.stopNumber}
+                          </span>
+                          <strong style={{ fontSize: '0.88rem', color: 'var(--text-primary)' }}>{item.name}</strong>
+                        </div>
+                        <span style={{ fontSize: '0.85rem', fontWeight: 800, color: item.color }}>{item.percent}%</span>
+                      </div>
+                      {/* Progress Bar */}
+                      <div style={{ height: '6px', width: '100%', backgroundColor: 'rgba(255, 255, 255, 0.08)', borderRadius: '3px', overflow: 'hidden', marginTop: '0.4rem' }}>
+                        <div style={{ width: `${item.percent}%`, height: '100%', backgroundColor: item.color, borderRadius: '3px' }} />
+                      </div>
+                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', display: 'block', marginTop: '0.25rem' }}>{item.tag} ({item.count} visit{item.count > 1 ? 's' : ''})</span>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>
@@ -2230,7 +2386,7 @@ export function StartTripInterface({
             </div>
 
             <span className="badge badge-success" style={{ marginBottom: '0.75rem', fontSize: '0.8rem', padding: '0.35rem 0.75rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
-              🏁 Target Destination Reached (5m Radius)
+              🏁 Target Destination Reached
             </span>
 
             <h2 id="destination-modal-title" style={{ fontSize: '1.35rem', fontWeight: 800, margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>
@@ -2238,7 +2394,7 @@ export function StartTripInterface({
             </h2>
 
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', margin: '0 0 1.25rem 0', lineHeight: 1.5 }}>
-              The vehicle is within <strong>5 meters</strong> of <strong>{activeTrip.toStop?.name || activeTrip.toStop}</strong>. Please prepare to alight safely.
+              The vehicle has arrived at <strong>{activeTrip.toStop?.name || activeTrip.toStop}</strong>. Please prepare to alight safely.
             </p>
 
             <div style={{
@@ -2277,6 +2433,165 @@ export function StartTripInterface({
                 onClick={() => setDestinationReachedModalOpen(false)}
               >
                 Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Instant Trip Feedback Modal (Triggered immediately after trip completion) */}
+      {feedbackTrip && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.72)',
+            display: 'grid',
+            placeItems: 'center',
+            zIndex: 1100,
+            padding: '1rem'
+          }}
+        >
+          <div
+            className="glass-card"
+            style={{
+              maxWidth: '480px',
+              width: '100%',
+              padding: '2rem',
+              textAlign: 'center',
+              backgroundColor: 'var(--bg-card, #ffffff)',
+              borderRadius: '16px',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.35)',
+              border: '2px solid #8b5cf6'
+            }}
+          >
+            <div style={{
+              width: '60px',
+              height: '60px',
+              borderRadius: '50%',
+              backgroundColor: 'rgba(139, 92, 246, 0.15)',
+              color: '#8b5cf6',
+              display: 'grid',
+              placeItems: 'center',
+              margin: '0 auto 1rem'
+            }}>
+              <Sparkles size={32} />
+            </div>
+
+            <h2 style={{ fontSize: '1.35rem', fontWeight: 800, margin: '0 0 0.35rem 0', color: 'var(--text-primary)' }}>
+              How was your bus trip?
+            </h2>
+
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', margin: '0 0 1.25rem 0', lineHeight: 1.4 }}>
+              Your immediate feedback helps Quezon City improve the QC Bus Libreng Sakay service.
+            </p>
+
+            <div style={{
+              backgroundColor: 'var(--bg-subtle)',
+              border: '1px solid var(--border-color)',
+              borderRadius: '8px',
+              padding: '0.75rem 1rem',
+              marginBottom: '1.25rem',
+              textAlign: 'left',
+              fontSize: '0.85rem'
+            }}>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', fontWeight: 700 }}>COMPLETED COMMUTE</div>
+              <strong style={{ color: 'var(--text-primary)', display: 'block', marginTop: '0.2rem' }}>
+                {feedbackTrip.fromStop?.name || feedbackTrip.fromStop} → {feedbackTrip.toStop?.name || feedbackTrip.toStop}
+              </strong>
+            </div>
+
+            <div style={{ marginBottom: '1.25rem', textAlign: 'left' }}>
+              <label className="form-label" style={{ fontWeight: 700, marginBottom: '0.5rem', display: 'block' }}>
+                Rate Your Trip Experience:
+              </label>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <button
+                    key={star}
+                    type="button"
+                    onClick={() => setFeedbackRating(star)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontSize: '2rem',
+                      lineHeight: 1,
+                      color: star <= feedbackRating ? '#f59e0b' : 'var(--border-color)',
+                      transition: 'transform 0.15s ease'
+                    }}
+                    title={`${star} Star${star > 1 ? 's' : ''}`}
+                  >
+                    ★
+                  </button>
+                ))}
+              </div>
+              <div style={{ textAlign: 'center', fontSize: '0.85rem', fontWeight: 600, color: '#f59e0b' }}>
+                {feedbackRating === 5 ? '⭐⭐⭐⭐⭐ Excellent' :
+                 feedbackRating === 4 ? '⭐⭐⭐⭐ Very Good' :
+                 feedbackRating === 3 ? '⭐⭐⭐ Average' :
+                 feedbackRating === 2 ? '⭐⭐ Needs Improvement' : '⭐ Poor'}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '1.5rem', textAlign: 'left' }}>
+              <label className="form-label" htmlFor="trip-feedback-input" style={{ fontWeight: 600 }}>
+                Comments or Suggestions (Optional):
+              </label>
+              <textarea
+                id="trip-feedback-input"
+                className="form-select"
+                rows="3"
+                maxLength={1000}
+                placeholder="Share your experience (conductor, comfort, bus timing)..."
+                value={feedbackText}
+                onChange={(e) => setFeedbackText(e.target.value)}
+                style={{ width: '100%', resize: 'none', marginTop: '0.35rem' }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
+              <button
+                type="button"
+                className="btn-primary"
+                style={{ flex: 1, padding: '0.75rem 1rem', fontSize: '0.92rem' }}
+                onClick={async () => {
+                  try {
+                    if (feedbackTrip.dbId) {
+                      const { submitJourneyFeedback } = await import('../services/supabaseClient');
+                      await submitJourneyFeedback(feedbackTrip.dbId, feedbackRating, feedbackText);
+                    }
+                    const savedFeedback = JSON.parse(localStorage.getItem('qcbus_user_feedback') || '[]');
+                    savedFeedback.unshift({
+                      tripId: feedbackTrip.id || feedbackTrip.dbId,
+                      rating: feedbackRating,
+                      text: feedbackText,
+                      date: new Date().toISOString()
+                    });
+                    localStorage.setItem('qcbus_user_feedback', JSON.stringify(savedFeedback.slice(0, 20)));
+                  } catch (_) {}
+                  setFeedbackTrip(null);
+                  setFeedbackText('');
+                  setFeedbackRating(5);
+                  onShowToast?.('Thank you for your feedback! Safe travels!');
+                }}
+              >
+                Submit Feedback
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ padding: '0.75rem 1.25rem', fontSize: '0.92rem' }}
+                onClick={() => {
+                  setFeedbackTrip(null);
+                  setFeedbackText('');
+                  setFeedbackRating(5);
+                }}
+              >
+                Skip
               </button>
             </div>
           </div>

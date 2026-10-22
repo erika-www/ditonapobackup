@@ -19,12 +19,22 @@ export const ROUTE4_STOPS = [
 
 export const SOUTHBOUND_ROUTE4_STOPS = [...ROUTE4_STOPS]
   .reverse()
-  .map((stop, index) => ({
-    ...stop,
-    id: `sb-stop-${index + 1}`,
-    stopNumber: index + 1,
-    sequenceNumber: index + 1
-  }));
+  .filter((stop) => {
+    // Remove "Mindanao Avenue - Quirino Highway Interchange" for southbound
+    const n = stop.name.toLowerCase();
+    return !(n.includes('quirino') && n.includes('mindanao'));
+  })
+  .map((stop, index) => {
+    const isNovaBayan = stop.name.toLowerCase().includes('bayan') || stop.name.toLowerCase().includes('nova');
+    return {
+      ...stop,
+      id: `sb-stop-${index + 1}`,
+      stopNumber: index + 1,
+      sequenceNumber: index + 1,
+      lat: isNovaBayan ? 14.721004296116766 : stop.lat,
+      lng: isNovaBayan ? 121.03876650768528 : stop.lng
+    };
+  });
 
 const COORDINATE_OVERRIDES_KEY = 'qcbus_route4_stop_coordinates';
 
@@ -108,9 +118,12 @@ export function resolveRoute4Stop(input, direction = null) {
     }
   }
 
+  const isSouth = direction && String(direction).toLowerCase().includes('south');
+  const pool = isSouth ? SOUTHBOUND_ROUTE4_STOPS : ROUTE4_STOPS;
+
   // 1. Direct normalized comparison against name, canonicalDbName, shortName
   const clean = rawStr.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const exact = ROUTE4_STOPS.find((s) => {
+  const exact = pool.find((s) => {
     const c1 = s.name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const c2 = s.canonicalDbName.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const c3 = (s.shortName || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -118,32 +131,52 @@ export function resolveRoute4Stop(input, direction = null) {
   });
   if (exact) return exact;
 
+  // If exact match not in Southbound pool because it was an NB stop name, check if valid in Southbound
+  if (isSouth) {
+    const nbMatch = ROUTE4_STOPS.find((s) => {
+      const c1 = s.name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      return clean === c1;
+    });
+    if (nbMatch) {
+      const inSouthPool = pool.find((s) => s.name.toLowerCase() === nbMatch.name.toLowerCase());
+      if (inSouthPool) return inSouthPool;
+      if (nbMatch.name.toLowerCase().includes('quirino') && nbMatch.name.toLowerCase().includes('mindanao')) {
+        return null; // Excluded in Southbound
+      }
+    }
+  }
+
   // 2. High-priority keyword and landmark mappings (tested against all variations)
   const lower = rawStr.toLowerCase();
+  const findInPool = (kw) => pool.find((s) => s.name.toLowerCase().includes(kw)) || null;
+
   if (lower.includes('sb road') || lower.includes('sb terminal') || (lower.includes('general luis') && !lower.includes('bayan') && !lower.includes('banahaw')) || (lower.includes('gen. luis') && !lower.includes('bayan') && !lower.includes('banahaw'))) {
-    return ROUTE4_STOPS[14]; // Stop 15: General Luis Avenue corner SB Road
+    return findInPool('sb road') || pool[0];
   }
-  if (lower.includes('banahaw')) return ROUTE4_STOPS[13]; // Stop 14: General Luis Avenue corner Banahaw Street
-  if (lower.includes('bayan') || lower.includes('nova bayan')) return ROUTE4_STOPS[12]; // Stop 13: General Luis Avenue – Novaliches Bayan
-  if (lower.includes('forest hills')) return ROUTE4_STOPS[11]; // Stop 12: Quirino Highway corner Forest Hills Drive
-  if (lower.includes('sm novaliches') || lower.includes('sm city')) return ROUTE4_STOPS[10]; // Stop 11: Quirino Highway – SM City Novaliches
-  if (lower.includes('qcu') || lower.includes('quezon city university') || lower.includes('novaliches district hospital') || lower.includes('ndh')) return ROUTE4_STOPS[9]; // Stop 10
-  if (lower.includes('sauyo')) return ROUTE4_STOPS[7]; // Stop 8: Mindanao Avenue corner Old Sauyo Road
-  if (lower.includes('munoz') || lower.includes('muñoz')) return ROUTE4_STOPS[6]; // Stop 7: Mindanao Avenue corner D. Muñoz Street
-  if (lower.includes('tandang sora')) return ROUTE4_STOPS[5]; // Stop 6: Mindanao Avenue corner Tandang Sora Avenue
-  if (lower.includes('congressional')) return ROUTE4_STOPS[4]; // Stop 5: Mindanao Avenue corner Congressional Avenue
-  if (lower.includes('tullahan')) return ROUTE4_STOPS[3]; // Stop 4: Mindanao Avenue – Tullahan Bridge
-  if (lower.includes('road 1') || lower.includes('rd 1') || lower.includes('rd. 1')) return ROUTE4_STOPS[2]; // Stop 3: Mindanao Avenue corner Road 1
-  if (lower.includes('veterans') || lower.includes('vmmc') || lower.includes('vertis')) return ROUTE4_STOPS[1]; // Stop 2: North Avenue – Veterans Hospital / Vertis North
-  if (lower.includes('qc hall') || lower.includes('quezon city hall') || lower.includes('nha') || lower.includes('elliptical')) return ROUTE4_STOPS[0]; // Stop 1: Quezon City Hall – NHA Interchange
-  if (lower.includes('quirino') && lower.includes('mindanao')) return ROUTE4_STOPS[8]; // Stop 9: Mindanao Avenue corner Quirino Highway – Interchange
+  if (lower.includes('banahaw')) return findInPool('banahaw') || pool[1];
+  if (lower.includes('bayan') || lower.includes('nova bayan')) return findInPool('bayan') || pool[2];
+  if (lower.includes('forest hills')) return findInPool('forest hills');
+  if (lower.includes('sm novaliches') || lower.includes('sm city')) return findInPool('sm city');
+  if (lower.includes('qcu') || lower.includes('quezon city university') || lower.includes('novaliches district hospital') || lower.includes('ndh')) return findInPool('university');
+  if (lower.includes('sauyo')) return findInPool('sauyo');
+  if (lower.includes('munoz') || lower.includes('muñoz')) return findInPool('muñoz') || findInPool('munoz');
+  if (lower.includes('tandang sora')) return findInPool('tandang sora');
+  if (lower.includes('congressional')) return findInPool('congressional');
+  if (lower.includes('tullahan')) return findInPool('tullahan');
+  if (lower.includes('road 1') || lower.includes('rd 1') || lower.includes('rd. 1')) return findInPool('road 1');
+  if (lower.includes('veterans') || lower.includes('vmmc') || lower.includes('vertis')) return findInPool('veterans') || findInPool('vertis');
+  if (lower.includes('qc hall') || lower.includes('quezon city hall') || lower.includes('nha') || lower.includes('elliptical')) return findInPool('quezon city hall') || pool[pool.length - 1];
+  if (lower.includes('quirino') && lower.includes('mindanao')) {
+    if (isSouth) return null; // Excluded on Southbound trip
+    return ROUTE4_STOPS[8];
+  }
 
   // 3. Token Jaccard similarity fallback (comparing name and landmark)
   const inTokens = tokenizeStop(rawStr);
   if (inTokens.length > 0) {
     let best = null;
     let bestScore = 0;
-    for (const s of ROUTE4_STOPS) {
+    for (const s of pool) {
       const sTokens = tokenizeStop(s.name);
       const matches = sTokens.filter((t) => inTokens.includes(t)).length;
       const union = new Set([...sTokens, ...inTokens]).size;
@@ -176,16 +209,15 @@ export function resolveRoute4Stop(input, direction = null) {
  * In Southbound: 0 (Gen. Luis SB Road) to 14 (QC Hall).
  */
 export function getStopIndex(stopInput, direction = 'Northbound') {
+  const isSouth = String(direction).toLowerCase().includes('south');
+  const pool = isSouth ? SOUTHBOUND_ROUTE4_STOPS : ROUTE4_STOPS;
   const resolved = resolveRoute4Stop(stopInput, direction);
   if (!resolved) return -1;
-  const canonicalIndex = ROUTE4_STOPS.findIndex((s) => (
+  return pool.findIndex((s) => (
     s.id === resolved.id ||
     s.canonicalDbName === resolved.canonicalDbName ||
     s.name.toLowerCase() === resolved.name.toLowerCase()
   ));
-  if (canonicalIndex === -1) return -1;
-  const isSouth = String(direction).toLowerCase().includes('south');
-  return isSouth ? (ROUTE4_STOPS.length - 1 - canonicalIndex) : canonicalIndex;
 }
 
 /**

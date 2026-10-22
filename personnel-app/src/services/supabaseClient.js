@@ -3,7 +3,7 @@
  * Manages Admin Auth, Role verification, Boarding Event RPCs, and Operational Queries.
  */
 import { createClient } from '@supabase/supabase-js';
-import { ROUTE4_STOPS, resolveRoute4Stop } from '@shared/route4Stops';
+import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, resolveRoute4Stop } from '@shared/route4Stops';
 import { parsePassengerQRCode, isPriorityCategory } from '@shared/qrPassUtils';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
@@ -797,14 +797,16 @@ export async function fetchJourneyByQrToken(rawToken, currentStop = null, direct
     }
 
     const effectiveDir = direction || parsed?.direction || data?.route_direction || 'Northbound';
+    const isSouth = String(effectiveDir).toLowerCase().includes('south');
+    const dirPool = isSouth ? SOUTHBOUND_ROUTE4_STOPS : ROUTE4_STOPS;
 
     // Resolve boarding & destination stops against canonical Route 4 stops
     // Prefer explicit stop from QR, then database record, then current bus stop
     const rawOrigin = parsed?.boardingStop || data?.origin_name || (currentStop ? (currentStop.name || currentStop) : null);
-    const resolvedOrigin = resolveRoute4Stop(rawOrigin, effectiveDir) || (currentStop ? resolveRoute4Stop(currentStop, effectiveDir) : null) || ROUTE4_STOPS[0];
+    const resolvedOrigin = resolveRoute4Stop(rawOrigin, effectiveDir) || (currentStop ? resolveRoute4Stop(currentStop, effectiveDir) : null) || dirPool[0];
 
     const rawDest = parsed?.destinationStop || data?.destination_name;
-    const resolvedDestination = resolveRoute4Stop(rawDest, effectiveDir) || ROUTE4_STOPS[ROUTE4_STOPS.length - 1];
+    const resolvedDestination = resolveRoute4Stop(rawDest, effectiveDir) || dirPool[dirPool.length - 1];
 
     if (data) {
       const cat = data.passenger_category || parsed?.category || data.profiles?.passenger_category || 'Regular';

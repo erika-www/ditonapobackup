@@ -187,11 +187,23 @@ export function RouteInformationPage() {
 
   // Ordered Stops List
   useEffect(() => {
-    const orderedStops = applyRoute4CoordinateOverrides(
-      direction === 'Southbound' ? [...routeStops].reverse() : routeStops,
-      direction
-    );
-    setStopsList(orderedStops.slice(0, 15).map((stop, idx) => ({
+    let base = routeStops;
+    if (direction === 'Southbound') {
+      base = [...routeStops]
+        .reverse()
+        .filter((s) => {
+          const n = s.name.toLowerCase();
+          return !(n.includes('quirino') && n.includes('mindanao'));
+        })
+        .map((s) => {
+          if (s.name.toLowerCase().includes('bayan') || s.name.toLowerCase().includes('nova')) {
+            return { ...s, lat: 14.721004296116766, lng: 121.03876650768528 };
+          }
+          return s;
+        });
+    }
+    const orderedStops = applyRoute4CoordinateOverrides(base, direction);
+    setStopsList(orderedStops.map((stop, idx) => ({
       ...stop,
       stopNumber: idx + 1,
       id: direction === 'Southbound' ? `sb-stop-${idx + 1}` : `stop-${idx + 1}`
