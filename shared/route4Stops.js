@@ -279,3 +279,125 @@ export function validateTripDirection(passengerDirection, boardingStop, destinat
 
   return { valid: true };
 }
+
+/**
+ * Haversine formula to compute distance in meters between two GPS coordinates.
+ */
+export function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
+  const p1 = Number(lat1);
+  const l1 = Number(lon1);
+  const p2 = Number(lat2);
+  const l2 = Number(lon2);
+  if (![p1, l1, p2, l2].every(Number.isFinite)) return Number.POSITIVE_INFINITY;
+  const R = 6371000; // Earth radius in meters
+  const dLat = ((p2 - p1) * Math.PI) / 180;
+  const dLon = ((l2 - l1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((p1 * Math.PI) / 180) *
+      Math.cos((p2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * Resolves destination stop data and coordinates from Route 4 stop definitions
+ * (incorporating direction context and any calibrated overrides).
+ *
+ * @param {string|object} destinationInput - Stop name, id, canonicalDbName, or stop object
+ * @param {string} [direction='Northbound'] - 'Northbound' or 'Southbound'
+ * @returns {object|null} The resolved Route 4 stop with verified lat & lng
+ */
+export function getRoute4DestinationStop(destinationInput, direction = 'Northbound') {
+  if (!destinationInput) return null;
+  const isSouth = direction && String(direction).toLowerCase().includes('south');
+  const normDir = isSouth ? 'Southbound' : 'Northbound';
+
+  const resolved = resolveRoute4Stop(destinationInput, normDir);
+  const pool = isSouth ? SOUTHBOUND_ROUTE4_STOPS : ROUTE4_STOPS;
+  const withOverrides = applyRoute4CoordinateOverrides(pool, normDir);
+
+  if (resolved) {
+    const overridden = withOverrides.find((s) => s.id === resolved.id || s.name === resolved.name);
+    return overridden || resolved;
+  }
+
+  // Fallback for object with explicit coordinates
+  if (typeof destinationInput === 'object' && destinationInput !== null) {
+    const lat = Number(destinationInput.lat ?? destinationInput.latitude);
+    const lng = Number(destinationInput.lng ?? destinationInput.longitude);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return {
+        ...destinationInput,
+        lat,
+        lng,
+        name: destinationInput.name || destinationInput.canonicalDbName || 'Destination'
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Checks if a given coordinate (such as the user's current latitude & longitude)
+ * has reached their destination by comparing against the Route 4 stop data.
+ *
+ * @param {number} currentLat - User's current latitude
+ * @param {number} currentLng - User's current longitude
+ * @param {string|object} destinationInput - Destination stop name, ID, or object
+ * @param {string} [direction='Northbound'] - Travel direction
+ * @param {number} [thresholdMeters=50] - Arrival proximity threshold in meters (default 50m)
+ * @returns {{
+ *   reached: boolean,
+ *   distanceMeters: number,
+ *   distanceKm: number,
+ *   destinationStop: object|null,
+ *   thresholdMeters: number
+ * }}
+ */
+export function checkDestinationReached(
+  currentLat,
+  currentLng,
+  destinationInput,
+  direction = 'Northbound',
+  thresholdMeters = 50
+) {
+  const lat = Number(currentLat);
+  const lng = Number(currentLng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return {
+      reached: false,
+      distanceMeters: Number.POSITIVE_INFINITY,
+      distanceKm: Number.POSITIVE_INFINITY,
+      destinationStop: null,
+      thresholdMeters
+    };
+  }
+
+  const destStop = getRoute4DestinationStop(destinationInput, direction);
+  if (!destStop || !Number.isFinite(Number(destStop.lat)) || !Number.isFinite(Number(destStop.lng))) {
+    return {
+      reached: false,
+      distanceMeters: Number.POSITIVE_INFINITY,
+      distanceKm: Number.POSITIVE_INFINITY,
+      destinationStop: null,
+      thresholdMeters
+    };
+  }
+
+  const distanceMeters = haversineDistanceMeters(lat, lng, Number(destStop.lat), Number(destStop.lng));
+  const distanceKm = distanceMeters / 1000;
+  const reached = distanceMeters <= thresholdMeters;
+
+  return {
+    reached,
+    distanceMeters: Math.round(distanceMeters * 10) / 10,
+    distanceKm: Math.round(distanceKm * 100) / 100,
+    destinationStop: destStop,
+    thresholdMeters
+  };
+}
+

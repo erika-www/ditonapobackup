@@ -12,7 +12,15 @@ import { QC_ROUTES } from '../mockData';
 import { ROUTE4_STOPS } from '@shared/route4Stops';
 import { fetchConfiguredRoute4Stops } from '../services/supabaseClient';
 
-export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, liveBusPlate, isSignalLost, lastUpdatedSecondsAgo }) {
+export function InteractiveMap({
+  onSelectStartStop,
+  onShowToast,
+  liveBusCoords,
+  liveBusPlate,
+  isSignalLost,
+  lastUpdatedSecondsAgo,
+  onUserLocationChange
+}) {
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markersGroupRef = useRef(null);
@@ -87,6 +95,7 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
         setUserLocation({ lat, lng });
         setCustomLat(lat.toFixed(5));
         setCustomLng(lng.toFixed(5));
+        onUserLocationChange?.({ lat, lng });
         if (onShowToast) {
           onShowToast(`GPS Position set to: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
         }
@@ -350,6 +359,7 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
           setCustomLat(lat.toFixed(5));
           setCustomLng(lng.toFixed(5));
           setIsLocating(false);
+          onUserLocationChange?.({ lat, lng, accuracy: pos.coords.accuracy });
 
           if (mapInstanceRef.current) {
             mapInstanceRef.current.setView([lat, lng], 14);
@@ -379,6 +389,7 @@ export function InteractiveMap({ onSelectStartStop, onShowToast, liveBusCoords, 
     }
 
     setUserLocation({ lat: parsedLat, lng: parsedLng });
+    onUserLocationChange?.({ lat: parsedLat, lng: parsedLng, accuracy: 10 });
     if (mapInstanceRef.current) {
       mapInstanceRef.current.setView([parsedLat, parsedLng], 14);
     }

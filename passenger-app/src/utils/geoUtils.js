@@ -125,3 +125,6 @@ export function getAccurateCurrentPosition({ desiredAccuracyMeters = 20, timeout
     );
   });
 }
+
+export { checkDestinationReached, getRoute4DestinationStop, haversineDistanceMeters } from '@shared/route4Stops';
+

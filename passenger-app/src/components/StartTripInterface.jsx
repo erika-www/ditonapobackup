@@ -5,7 +5,7 @@
  * - Profile & Settings section showing user details (Name, Account Used, Passenger Category) and App Preferences (Light/Dark Theme, Text Size, English/Filipino Language)
  * - Realtime live GPS bus tracking & seat availability monitor
  */
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Home, MapPin, Bus, User, Clock, Users, ArrowRight, ArrowUp, ArrowDown,
   Download, Navigation, CheckCircle, XCircle, AlertTriangle,
@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { QC_ROUTES } from '../mockData';
 import { StopQueuePredictor } from './StopQueuePredictor';
-import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, getStopIndex, resolveRoute4Stop } from '@shared/route4Stops';
+import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, getStopIndex, resolveRoute4Stop, checkDestinationReached, getRoute4DestinationStop, haversineDistanceMeters } from '@shared/route4Stops';
 import { generateDailyTripId, createPassengerQrPayload, isPriorityCategory, hasPriorityInParty } from '@shared/qrPassUtils';
 import { drawQRCodeCanvas, downloadQRImage } from '../utils/qrGenerator';
 import { InteractiveMap } from './InteractiveMap';
@@ -448,43 +448,109 @@ export function StartTripInterface({
 
   const reachedStopNotice = useRef(false);
 
-  // Proximity detection for destination reached via bus location (25-meter radius: 0.025 km)
+  // User live location state and calculated distance to destination from route4Stops.js
+  const [userLocationReading, setUserLocationReading] = useState(null); // { lat, lng, accuracy, updatedAt }
+  const [userDestinationDistance, setUserDestinationDistance] = useState(null); // { reached, distanceMeters, distanceKm, destinationStop }
+
+  // Target destination stop resolved from route4Stops.js matching activeTrip
+  const activeDestinationStop = useMemo(() => {
+    if (!activeTrip) return null;
+    const destInput = activeTrip.toStop?.canonicalDbName || activeTrip.toStop?.name || activeTrip.toStop || activeTrip.destination_name;
+    return getRoute4DestinationStop(destInput, activeTrip.direction || 'Northbound');
+  }, [activeTrip]);
+
+  // Handler for user location updates (from browser GPS or manual map interactions)
+  const handleUserLocationUpdate = useCallback((coords) => {
+    if (!coords || !activeTrip) return;
+    const lat = Number(coords.lat);
+    const lng = Number(coords.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    setUserLocationReading({
+      lat,
+      lng,
+      accuracy: Number(coords.accuracy) || 15,
+      updatedAt: Date.now()
+    });
+
+    const destInput = activeTrip.toStop?.canonicalDbName || activeTrip.toStop?.name || activeTrip.toStop || activeTrip.destination_name;
+    const destStop = getRoute4DestinationStop(destInput, activeTrip.direction || 'Northbound');
+    if (!destStop?.lat || !destStop?.lng) return;
+
+    const thresholdM = Math.min(80, Math.max(50, Number(coords.accuracy) || 20));
+    const result = checkDestinationReached(lat, lng, destStop, activeTrip.direction || 'Northbound', thresholdM);
+    setUserDestinationDistance(result);
+
+    if (result.reached && !reachedStopNotice.current) {
+      reachedStopNotice.current = true;
+      setDestinationReachedModalOpen(true);
+      onShowToast?.(`🎯 Destination reached: ${destStop.name}! Your GPS coordinates match this stop.`, 'stop-reached');
+    }
+  }, [activeTrip, onShowToast]);
+
+  // 1. Proximity detection for destination reached via user's device GPS comparing against route4Stops.js
   useEffect(() => {
     if (!activeTrip || reachedStopNotice.current) return;
-    const stop = activeTrip.toStop;
-    if (stop?.lat && stop?.lng && liveBusCoords?.lat && liveBusCoords?.lng) {
-      const distKm = calculateDistanceKm(liveBusCoords.lat, liveBusCoords.lng, stop.lat, stop.lng);
-      if (distKm <= 0.025) {
+    if (!navigator.geolocation) return;
+
+    const destInput = activeTrip.toStop?.canonicalDbName || activeTrip.toStop?.name || activeTrip.toStop || activeTrip.destination_name;
+    const destStop = getRoute4DestinationStop(destInput, activeTrip.direction || 'Northbound');
+    if (!destStop?.lat || !destStop?.lng) return;
+
+    const handlePos = (pos) => {
+      if (!activeTrip || reachedStopNotice.current) return;
+      const userLat = pos.coords.latitude;
+      const userLng = pos.coords.longitude;
+      const accuracy = Number(pos.coords.accuracy) || 20;
+
+      setUserLocationReading({
+        lat: userLat,
+        lng: userLng,
+        accuracy,
+        updatedAt: Date.now()
+      });
+
+      // Compare user's current longitude and latitude with Route 4 stop data from route4Stops.js
+      const thresholdM = Math.min(80, Math.max(50, accuracy));
+      const result = checkDestinationReached(userLat, userLng, destStop, activeTrip.direction || 'Northbound', thresholdM);
+      setUserDestinationDistance(result);
+
+      if (result.reached) {
         reachedStopNotice.current = true;
         setDestinationReachedModalOpen(true);
-        onShowToast?.(`Your bus has reached destination: ${stop.name || stop}!`, 'stop-reached');
+        onShowToast?.(`🎯 You have reached your destination: ${destStop.name}! Your GPS coordinates match this stop.`, 'stop-reached');
       }
-    }
-  }, [activeTrip, liveBusCoords, onShowToast]);
-
-  // Proximity detection for destination reached via device GPS (25-meter radius: 0.025 km)
-  useEffect(() => {
-    if (!activeTrip || reachedStopNotice.current) return;
-    const stop = activeTrip.toStop;
-    if (!stop?.lat || !stop?.lng || !navigator.geolocation) return;
+    };
 
     const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        if (!activeTrip || reachedStopNotice.current) return;
-        const distKm = calculateDistanceKm(pos.coords.latitude, pos.coords.longitude, stop.lat, stop.lng);
-        if (distKm <= 0.025) {
-          reachedStopNotice.current = true;
-          setDestinationReachedModalOpen(true);
-          onShowToast?.(`You have reached your destination: ${stop.name || stop}!`, 'stop-reached');
-        }
+      handlePos,
+      (err) => {
+        console.warn('Passenger GPS watchPosition error:', err);
       },
-      () => {},
       { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
     );
+
     return () => {
       navigator.geolocation.clearWatch(watchId);
     };
   }, [activeTrip, onShowToast]);
+
+  // 2. Proximity detection for destination reached via live vehicle/bus location comparing against route4Stops.js
+  useEffect(() => {
+    if (!activeTrip || reachedStopNotice.current) return;
+    if (!liveBusCoords?.lat || !liveBusCoords?.lng) return;
+
+    const destInput = activeTrip.toStop?.canonicalDbName || activeTrip.toStop?.name || activeTrip.toStop || activeTrip.destination_name;
+    const destStop = getRoute4DestinationStop(destInput, activeTrip.direction || 'Northbound');
+    if (!destStop?.lat || !destStop?.lng) return;
+
+    const result = checkDestinationReached(liveBusCoords.lat, liveBusCoords.lng, destStop, activeTrip.direction || 'Northbound', 40);
+    if (result.reached) {
+      reachedStopNotice.current = true;
+      setDestinationReachedModalOpen(true);
+      onShowToast?.(`🚌 Your bus has reached destination: ${destStop.name}!`, 'stop-reached');
+    }
+  }, [activeTrip, liveBusCoords, onShowToast]);
 
   // Broadcast & Scanner Completion listener for instant arrival trigger
   useEffect(() => {
@@ -551,6 +617,8 @@ export function StartTripInterface({
     if (!activeTrip) {
       reachedStopNotice.current = false;
       setDestinationReachedModalOpen(false);
+      setUserLocationReading(null);
+      setUserDestinationDistance(null);
     }
   }, [activeTrip]);
 
@@ -1270,6 +1338,69 @@ export function StartTripInterface({
                   <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Dispatcher:</span>
                   <div style={{ fontWeight: 700 }}>{routeBusTrip?.personnel?.dispatcherName || 'Not assigned'}</div>
                 </div>
+                <div>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>GPS Destination Status:</span>
+                  <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>
+                    {userDestinationDistance ? (
+                      userDestinationDistance.reached ? (
+                        <span className="badge badge-success" style={{ fontSize: '0.78rem', padding: '0.2rem 0.55rem' }}>
+                          🏁 Reached ({userDestinationDistance.distanceMeters}m)
+                        </span>
+                      ) : (
+                        <span style={{ color: userDestinationDistance.distanceMeters < 300 ? '#10b981' : (userDestinationDistance.distanceMeters < 1000 ? '#f59e0b' : 'var(--text-primary)') }}>
+                          📍 {userDestinationDistance.distanceMeters < 1000
+                            ? `${Math.round(userDestinationDistance.distanceMeters)} m away`
+                            : `${userDestinationDistance.distanceKm} km away`}
+                        </span>
+                      )
+                    ) : (
+                      <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                        🛰️ Acquiring GPS...
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Live GPS Comparison & Geofence Banner */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '0.65rem 0.95rem',
+                borderRadius: '8px',
+                backgroundColor: userDestinationDistance?.reached ? 'rgba(16, 185, 129, 0.12)' : 'var(--bg-subtle)',
+                border: userDestinationDistance?.reached ? '1.5px solid #10b981' : '1px solid var(--border-color)',
+                marginBottom: '1.25rem',
+                fontSize: '0.84rem',
+                flexWrap: 'wrap',
+                gap: '0.6rem'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span className="pulse-dot" style={{ backgroundColor: userDestinationDistance?.reached ? '#10b981' : '#0284c7' }}></span>
+                  <div>
+                    <strong>Live Passenger GPS:</strong>{' '}
+                    {userLocationReading ? (
+                      <span>
+                        Lat {userLocationReading.lat.toFixed(5)}, Lng {userLocationReading.lng.toFixed(5)}{' '}
+                        <span style={{ color: 'var(--text-muted)', fontSize: '0.76rem' }}>(±{Math.round(userLocationReading.accuracy)}m accuracy)</span>
+                      </span>
+                    ) : (
+                      <span style={{ color: 'var(--text-muted)' }}>Tracking device location...</span>
+                    )}
+                  </div>
+                </div>
+                {activeDestinationStop && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                    <span>Route 4 Target Stop:</span>
+                    <strong style={{ color: userDestinationDistance?.reached ? '#10b981' : 'var(--primary)' }}>
+                      {activeDestinationStop.shortName || activeDestinationStop.name}
+                    </strong>
+                    <span style={{ color: 'var(--text-muted)' }}>
+                      ({Number(activeDestinationStop.lat).toFixed(4)}, {Number(activeDestinationStop.lng).toFixed(4)})
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Digital Boarding Pass Display - Image 2 Format */}
@@ -2048,6 +2179,7 @@ export function StartTripInterface({
             isSignalLost={isSignalLost}
             lastUpdatedSecondsAgo={lastUpdatedSecondsAgo}
             onShowToast={onShowToast}
+            onUserLocationChange={handleUserLocationUpdate}
             onSelectStartStop={(stop) => {
               setStartStop(stop);
               setActiveTab('home');
@@ -2394,7 +2526,7 @@ export function StartTripInterface({
             </h2>
 
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', margin: '0 0 1.25rem 0', lineHeight: 1.5 }}>
-              The vehicle has arrived at <strong>{activeTrip.toStop?.name || activeTrip.toStop}</strong>. Please prepare to alight safely.
+              Your current GPS location matches destination <strong>{activeDestinationStop?.name || activeTrip.toStop?.name || activeTrip.toStop}</strong> along Route 4 ({activeTrip.direction || 'Northbound'}). Please prepare to alight safely!
             </p>
 
             <div style={{
@@ -2409,7 +2541,14 @@ export function StartTripInterface({
             }}>
               <div><strong>Pass ID:</strong> {activeTrip.id}</div>
               <div><strong>Boarding Stop:</strong> {activeTrip.fromStop?.name || activeTrip.fromStop}</div>
-              <div><strong>Destination Stop:</strong> {activeTrip.toStop?.name || activeTrip.toStop}</div>
+              <div><strong>Destination Stop:</strong> {activeDestinationStop?.name || activeTrip.toStop?.name || activeTrip.toStop}</div>
+              <div><strong>Route 4 Stop GPS:</strong> {activeDestinationStop ? `${Number(activeDestinationStop.lat).toFixed(5)}, ${Number(activeDestinationStop.lng).toFixed(5)}` : 'Route 4 stop data'}</div>
+              {userLocationReading && (
+                <div><strong>Your Device GPS:</strong> {`${userLocationReading.lat.toFixed(5)}, ${userLocationReading.lng.toFixed(5)} (±${Math.round(userLocationReading.accuracy)}m)`}</div>
+              )}
+              {userDestinationDistance && (
+                <div><strong>Arrival Proximity:</strong> {`${userDestinationDistance.distanceMeters}m to stop coordinates (Arrival zone: ≤${userDestinationDistance.thresholdMeters}m)`}</div>
+              )}
               <div><strong>Category:</strong> {activeTrip.category || 'Regular'}</div>
               <div><strong>Passengers:</strong> {activeTrip.totalPassengers || 1}</div>
             </div>

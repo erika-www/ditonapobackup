@@ -7,6 +7,7 @@ import { WhereToGoPage } from './pages/WhereToGoPage';
 import { AboutPage } from './pages/AboutPage';
 import { StartTripInterface } from './components/StartTripInterface';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { checkDestinationReached, getRoute4DestinationStop } from '@shared/route4Stops';
 
 export function AppContent() {
   const { currentUser, signOut, updateCategory, loading, authError, profileError, retryProfile } = useAuth();
@@ -52,6 +53,40 @@ export function AppContent() {
       return () => clearTimeout(id);
     }
   }, [authError]);
+
+  // Background GPS monitoring for active trip destination reached when browsing outside dashboard
+  useEffect(() => {
+    if (!activeTrip || inTripDashboard || !navigator.geolocation) return;
+    const destInput = activeTrip.toStop?.canonicalDbName || activeTrip.toStop?.name || activeTrip.toStop || activeTrip.destination_name;
+    const destStop = getRoute4DestinationStop(destInput, activeTrip.direction || 'Northbound');
+    if (!destStop?.lat || !destStop?.lng) return;
+
+    let notified = false;
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        if (notified) return;
+        const result = checkDestinationReached(
+          pos.coords.latitude,
+          pos.coords.longitude,
+          destStop,
+          activeTrip.direction || 'Northbound',
+          Math.min(80, Math.max(50, pos.coords.accuracy || 20))
+        );
+        if (result.reached) {
+          notified = true;
+          showToast(`🎯 Destination reached: ${destStop.name}! Returning to your boarding pass...`);
+          setInTripDashboard(true);
+          setDashboardTab('home');
+        }
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
+    );
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [activeTrip, inTripDashboard]);
 
   const handleUpdateCategory = async (newCategory) => {
     if (currentUser) {
