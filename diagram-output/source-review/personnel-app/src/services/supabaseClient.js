@@ -786,7 +786,7 @@ export async function fetchJourneyByQrToken(rawToken, currentStop = null, direct
         const journeyQuery = supabase.from('passenger_journeys')
           .select('id,qr_token,trip_id,passenger_id,status,passenger_name,passenger_category,passenger_count,companions,origin_name,destination_name,route_direction,created_at,profiles:profiles(full_name,passenger_category)');
         const queryRes = isUuid
-          ? await journeyQuery.or(`qr_token.eq."${searchToken}",id.eq."${searchToken}"`).maybeSingle()
+          ? await journeyQuery.or(`qr_token.eq.${searchToken},id.eq.${searchToken}`).maybeSingle()
           : await journeyQuery.eq('qr_token', searchToken).maybeSingle();
         if (!queryRes.error && queryRes.data) {
           data = queryRes.data;

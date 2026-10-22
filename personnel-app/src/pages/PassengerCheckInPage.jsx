@@ -62,10 +62,71 @@ export function PassengerCheckInPage() {
     if (registryResult.success) {
       setRegistry((prevRows) => {
         const dbRows = registryResult.data || [];
-        const dbIds = new Set(dbRows.map((r) => r.id || r.qr_token));
-        // Preserve any newly scanned local entries that haven't arrived via polling yet
-        const localOnly = prevRows.filter((r) => !dbIds.has(r.id) && (!r.qr_token || !dbIds.has(r.qr_token)));
-        const combined = [...dbRows, ...localOnly];
+        const statusRank = (status) => {
+          const s = String(status || '').toLowerCase();
+          if (s === 'completed' || s === 'alighted' || s === 'done') return 3;
+          if (s === 'boarded' || s === 'onboard' || s === 'active') return 2;
+          return 1;
+        };
+
+        const prevById = new Map();
+        const prevByToken = new Map();
+        (prevRows || []).forEach((row) => {
+          if (row.id) prevById.set(String(row.id), row);
+          if (row.qr_token) prevByToken.set(String(row.qr_token), row);
+        });
+
+        const mergedIds = new Set();
+        const mergedTokens = new Set();
+
+        const combined = dbRows.map((dbRow) => {
+          const rowId = dbRow.id ? String(dbRow.id) : null;
+          const rowToken = dbRow.qr_token ? String(dbRow.qr_token) : null;
+          const localMatch = (rowId && prevById.get(rowId)) || (rowToken && prevByToken.get(rowToken));
+
+          if (rowId) mergedIds.add(rowId);
+          if (rowToken) mergedTokens.add(rowToken);
+
+          if (localMatch) {
+            const localRank = statusRank(localMatch.status);
+            const dbRank = statusRank(dbRow.status);
+            if (localRank > dbRank) {
+              return {
+                ...dbRow,
+                ...localMatch,
+                id: dbRow.id || localMatch.id,
+                trip_id: dbRow.trip_id || localMatch.trip_id,
+                status: localMatch.status,
+                boarded_at: localMatch.boarded_at || dbRow.boarded_at,
+                alighted_at: localMatch.alighted_at || dbRow.alighted_at,
+                origin_name: localMatch.origin_name || dbRow.origin_name,
+                destination_name: localMatch.destination_name || dbRow.destination_name,
+                count: localMatch.count || Math.max(1, Number(dbRow.passenger_count) || 1)
+              };
+            }
+            return {
+              ...localMatch,
+              ...dbRow,
+              count: Math.max(1, Number(dbRow.count || dbRow.passenger_count || localMatch.count) || 1),
+              origin_name: localMatch.origin_name || dbRow.origin_name,
+              destination_name: localMatch.destination_name || dbRow.destination_name
+            };
+          }
+          return {
+            ...dbRow,
+            count: Math.max(1, Number(dbRow.count || dbRow.passenger_count) || 1)
+          };
+        });
+
+        (prevRows || []).forEach((row) => {
+          const rId = row.id ? String(row.id) : null;
+          const rToken = row.qr_token ? String(row.qr_token) : null;
+          const inDb = (rId && mergedIds.has(rId)) || (rToken && mergedTokens.has(rToken));
+          if (!inDb) {
+            combined.push(row);
+          }
+        });
+
         try {
           const plate = dutySession?.plateNumber || 'QC-BUS';
           localStorage.setItem(`qcbus_registry_${plate}`, JSON.stringify(combined));
@@ -251,7 +312,16 @@ export function PassengerCheckInPage() {
           updated_at: now
         };
         const token = updatedJourney.qr_token || updatedJourney.id;
-        supabase.from('passenger_journeys').update(updateData).or(`id.eq."${journey.id}",qr_token.eq."${token}"`).catch(() => {});
+        const isUuid = (str) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(str || ''));
+        if (journey.id && isUuid(journey.id)) {
+          supabase.from('passenger_journeys').update(updateData).eq('id', journey.id).then(({ error }) => {
+            if (error && token) {
+              supabase.from('passenger_journeys').update(updateData).eq('qr_token', token).catch(() => {});
+            }
+          }).catch(() => {});
+        } else if (token) {
+          supabase.from('passenger_journeys').update(updateData).eq('qr_token', token).catch(() => {});
+        }
       } catch (_) {}
 
       if (eventType === 'board') {
