@@ -22,17 +22,20 @@ import {
   supabase
 } from '../services/supabaseClient';
 import {
+  sendTripStart,
+  sendTripEnd,
   sendDirectionToBridge,
   endTripOnBridge,
   fetchBridgeStatus,
-  fetchLatestBridgeGps
+  fetchLatestBridgeGps,
+  fetchAnnouncerState
 } from '../services/busAnnouncerBridge';
 import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, applyRoute4CoordinateOverrides, resolveRoute4Stop, validateTripDirection, detectPassengerDirection, getStopIndex } from '@shared/route4Stops';
 import { getStopRecommendedBoarding } from '@shared/queueAndBoardingService';
 import { parsePassengerQRCode, isPriorityCategory, hasPriorityInParty } from '@shared/qrPassUtils';
 import { QrCameraScannerModal } from '../components/QrCameraScannerModal';
 import {
-  Users, MapPin, ArrowUp, ArrowDown, Play, Pause,
+  Users, MapPin, ArrowUp, ArrowDown, Play, Pause, Square,
   RotateCcw, ShieldCheck, UserCheck,
   Volume2, VolumeX, Camera, Sparkles
 } from 'lucide-react';
@@ -44,62 +47,21 @@ export function RouteInformationPage() {
   // Current Live Time & Date Today (Hours and Minutes ONLY)
   const [currentTime, setCurrentTime] = useState(new Date());
 
-  useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
   // Direction State (Northbound vs Southbound)
-  const [direction, setDirection] = useState(dutySession.tripDirection || 'Northbound');
+  const [direction, setDirection] = useState(dutySession?.tripDirection || 'Northbound');
   const [routeStops, setRouteStops] = useState(ROUTE4_STOPS);
-
-  // Pi 3B Bus Announcer Connection State
-  const [announcerInfo, setAnnouncerInfo] = useState({ online: false, checking: true, lastCheck: null });
-
-  useEffect(() => {
-    let active = true;
-    const checkBridge = async () => {
-      const res = await fetchBridgeStatus();
-      if (active) {
-        setAnnouncerInfo({ online: Boolean(res.online), checking: false, lastCheck: Date.now() });
-      }
-    };
-    checkBridge();
-    const timer = setInterval(checkBridge, 6000);
-    return () => { active = false; clearInterval(timer); };
-  }, []);
 
   // Dynamic Stops list according to direction
   const [stopsList, setStopsList] = useState(direction === 'Southbound' ? SOUTHBOUND_ROUTE4_STOPS : routeStops);
 
-  useEffect(() => {
-    let mounted = true;
-    fetchConfiguredRoute4Stops().then((result) => {
-      if (mounted && result.success && result.data.length) {
-        setRouteStops(result.data.slice(0, 15));
-      }
-    });
-    return () => { mounted = false; };
-  }, []);
-
-  useEffect(() => {
-    const orderedStops = applyRoute4CoordinateOverrides(
-      direction === 'Southbound' ? [...routeStops].reverse() : routeStops,
-      direction
-    );
-    setStopsList(orderedStops.slice(0, 15).map((stop, idx) => ({
-      ...stop,
-      stopNumber: idx + 1,
-      id: direction === 'Southbound' ? `sb-stop-${idx + 1}` : `stop-${idx + 1}`
-    })));
-  }, [direction, routeStops]);
-
   // Current stop index & Trip movement state
   const [currentStopIndex, setCurrentStopIndex] = useState(0);
+  const [headingStopIndex, setHeadingStopIndex] = useState(1);
   const [isTripActive, setIsTripActive] = useState(false);
   const [tripCount, setTripCount] = useState(1);
   const [statusMessage, setStatusMessage] = useState(null);
-  const testRegistryKey = `qcbus_test_registry_${dutySession.tripId || 'local'}_${new Date().toISOString().slice(0, 10)}`;
+
+  const testRegistryKey = `qcbus_test_registry_${dutySession?.tripId || 'local'}_${new Date().toISOString().slice(0, 10)}`;
   const tripSegmentKey = `${testRegistryKey}_started_at`;
   const [tripSegmentStartedAt, setTripSegmentStartedAt] = useState(() => Number(localStorage.getItem(tripSegmentKey)) || 0);
   const [passengerRegistry, setPassengerRegistry] = useState(() => {
@@ -114,7 +76,7 @@ export function RouteInformationPage() {
   });
   const [operationalTripId, setOperationalTripId] = useState(null);
 
-  // Real-time Vehicle Device Geolocation State
+  // Real-time Vehicle Device Geolocation State (from G-703 USB receiver on Pi 4B)
   const [deviceGps, setDeviceGps] = useState({
     active: false,
     latitude: null,
@@ -122,8 +84,25 @@ export function RouteInformationPage() {
     accuracy: null,
     speed: null,
     heading: null,
+    satellites: null,
+    altitude: null,
     error: null,
-    lastUpdated: null
+    lastUpdated: null,
+    source: null,
+    port: null
+  });
+
+  // GPS Matching & Stop Progression State
+  const [stopDistances, setStopDistances] = useState({});
+  const [distanceToHeading, setDistanceToHeading] = useState(null);
+  const [tripPhase, setTripPhase] = useState('idle'); // 'idle' | 'waiting' | 'in_transit' | 'approaching' | 'at_stop' | 'completed'
+
+  // Pi 3B Bus Announcer Connection & State (Rule 2: GET /api/state every 2 to 3 seconds)
+  const [announcerInfo, setAnnouncerInfo] = useState({
+    online: false,
+    checking: true,
+    lastCheck: null,
+    state: null
   });
 
   // Manual Registration State
@@ -133,9 +112,91 @@ export function RouteInformationPage() {
   const [manualDestination, setManualDestination] = useState('');
   const [manualRegistrationBusy, setManualRegistrationBusy] = useState(false);
   const manualSubmissionRef = useRef(false);
+  const lastTripsDoneRef = useRef(null);
 
   const scannerBufferRef = useRef('');
   const scannerResetTimerRef = useRef(null);
+
+  // Clock Poller
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Pi 3B State Poller (Rule 2)
+  useEffect(() => {
+    let active = true;
+    const pollState = async () => {
+      const state = await fetchAnnouncerState();
+      if (!active) return;
+
+      if (!state || state.online === false || state.error) {
+        setAnnouncerInfo(prev => ({
+          ...prev,
+          online: false,
+          checking: false,
+          lastCheck: Date.now(),
+          state: null
+        }));
+        return;
+      }
+
+      setAnnouncerInfo({
+        online: true,
+        checking: false,
+        lastCheck: Date.now(),
+        state
+      });
+
+      // Synchronize stop indexes per Rule 5
+      if (typeof state.current_idx === 'number' && state.current_idx >= 0) {
+        setCurrentStopIndex(state.current_idx);
+      }
+      if (typeof state.idx === 'number' && state.idx >= 0) {
+        setHeadingStopIndex(state.idx);
+      }
+
+      // Rule 5: Trip ended automatically when trips_done increments and active becomes false
+      if (
+        isTripActive &&
+        state.active === false &&
+        typeof state.trips_done === 'number' &&
+        typeof lastTripsDoneRef.current === 'number' &&
+        state.trips_done > lastTripsDoneRef.current
+      ) {
+        setIsTripActive(false);
+        setStatusMessage('🏁 Trip completed! Pi 3B Announcer reached final terminus stop.');
+      }
+    };
+
+    pollState();
+    const timer = setInterval(pollState, 2500); // Poll every 2.5 seconds (per Rule 2)
+    return () => { active = false; clearInterval(timer); };
+  }, [isTripActive]);
+
+  // Stops Initializer
+  useEffect(() => {
+    let mounted = true;
+    fetchConfiguredRoute4Stops().then((result) => {
+      if (mounted && result.success && result.data.length) {
+        setRouteStops(result.data.slice(0, 15));
+      }
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  // Ordered Stops List
+  useEffect(() => {
+    const orderedStops = applyRoute4CoordinateOverrides(
+      direction === 'Southbound' ? [...routeStops].reverse() : routeStops,
+      direction
+    );
+    setStopsList(orderedStops.slice(0, 15).map((stop, idx) => ({
+      ...stop,
+      stopNumber: idx + 1,
+      id: direction === 'Southbound' ? `sb-stop-${idx + 1}` : `stop-${idx + 1}`
+    })));
+  }, [direction, routeStops]);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,7 +225,7 @@ export function RouteInformationPage() {
             const plate = dutySession?.plateNumber || 'QC-BUS';
             const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
             localStorage.setItem(key, JSON.stringify(combined));
-          } catch (_) { }
+          } catch (_) {}
           return combined;
         });
       }
@@ -172,14 +233,14 @@ export function RouteInformationPage() {
     refreshRegistry();
     const timer = setInterval(refreshRegistry, 4000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [dutySession.tripId, dutySession.plateNumber, operationalTripId, isTestMode, tripSegmentStartedAt, isTripActive, testRegistryKey]);
+  }, [dutySession?.tripId, dutySession?.plateNumber, operationalTripId, isTestMode, tripSegmentStartedAt, isTripActive, testRegistryKey]);
 
   useEffect(() => {
     try {
       const plate = dutySession?.plateNumber || 'QC-BUS';
       const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
       localStorage.setItem(key, JSON.stringify(passengerRegistry));
-    } catch (_) { }
+    } catch (_) {}
   }, [isTestMode, passengerRegistry, testRegistryKey, dutySession?.plateNumber]);
 
   const currentStop = stopsList[currentStopIndex] || stopsList[0];
@@ -198,7 +259,7 @@ export function RouteInformationPage() {
     return acc + (!isPri ? (Number(curr.count) || 1) : 0);
   }, 0);
 
-  const busCapacity = Number(dutySession.busCapacity) || 50;
+  const busCapacity = Number(dutySession?.busCapacity) || 50;
   const prioritySeatCapacity = Math.min(20, busCapacity);
   const regularSeatCapacity = Math.max(0, busCapacity - prioritySeatCapacity);
   const availablePrioritySeats = Math.max(0, prioritySeatCapacity - priorityBoarded);
@@ -236,7 +297,19 @@ export function RouteInformationPage() {
   // Match GPS fixes against every stop so missed or out-of-order arrivals can recover.
   const lastTriggeredStopRef = useRef(null);
   const busIdRef = useRef(null);
-  const ARRIVAL_RADIUS_METERS = 5; // 5-meter radius trigger for all stops & target destination
+  const ARRIVAL_RADIUS_METERS = 40; // 40-meter radius trigger for realistic GPS stop arrival
+  const APPROACH_RADIUS_METERS = 140; // 140-meter radius for "approaching stop" detection
+  const DEPARTURE_RADIUS_METERS = 50; // 50-meter departure threshold from current stop
+
+  const calculateDistanceMeters = (lat1, lon1, lat2, lon2) => {
+    if (!Number.isFinite(lat1) || !Number.isFinite(lon1) || !Number.isFinite(lat2) || !Number.isFinite(lon2)) return Infinity;
+    const R = 6371000;
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
 
   const ensureOperationalTrip = async () => {
     if (dutySession.plateNumber) {
@@ -277,7 +350,7 @@ export function RouteInformationPage() {
         }
         return ongoing.data.bus_id;
       }
-    } catch (_) { }
+    } catch (_) {}
 
     // 2. Check bus by plate number
     try {
@@ -287,7 +360,7 @@ export function RouteInformationPage() {
         busIdRef.current = bus.id;
         return bus.id;
       }
-    } catch (_) { }
+    } catch (_) {}
 
     // 3. Ensure duty trip is started for bus
     try {
@@ -303,7 +376,7 @@ export function RouteInformationPage() {
         if (started.data.trip?.id) setOperationalTripId(started.data.trip.id);
         return started.data.bus.id;
       }
-    } catch (_) { }
+    } catch (_) {}
 
     // 4. Fallback to any active bus
     try {
@@ -313,7 +386,7 @@ export function RouteInformationPage() {
         busIdRef.current = fallbackBus.id;
         return fallbackBus.id;
       }
-    } catch (_) { }
+    } catch (_) {}
 
     return null;
   };
@@ -349,27 +422,43 @@ export function RouteInformationPage() {
           bc.postMessage({ type: 'BUS_LOCATION_UPDATE', payload });
           bc.close();
         }
-      } catch (_) { }
+      } catch (_) {}
     }
 
     return publishCurrentBusLocation(bId, payload);
   };
 
-  const triggerArrivalAtStop = (stopIdx) => {
+  const triggerArrivalAtStop = (stopIdx, currentDistance = null) => {
     if (stopIdx < 0 || stopIdx >= stopsList.length) return;
     const targetStop = stopsList[stopIdx];
-    const isTargetDestination = stopIdx === stopsList.length - 1;
+    const isTargetDestination = (stopIdx === stopsList.length - 1);
+
     setCurrentStopIndex(stopIdx);
+    if (stopIdx < stopsList.length - 1) {
+      setHeadingStopIndex(stopIdx + 1);
+      setTripPhase('at_stop');
+    } else {
+      setHeadingStopIndex(stopIdx);
+      setTripPhase('completed');
+    }
+
+    lastTriggeredStopRef.current = targetStop.id || stopIdx;
+
     if (!isTripActive) {
       setStatusMessage('Start the trip before registering passengers at a stop.');
       return;
     }
+
     setShowManualRegistration(true);
     setManualDestination(stopsList[stopIdx + 1]?.name || '');
+
+    const distInfo = (currentDistance != null && Number.isFinite(currentDistance))
+      ? ` (${Math.round(currentDistance)}m GPS proximity)`
+      : '';
+
     setStatusMessage(isTargetDestination
-      ? `🏁 TARGET DESTINATION REACHED: Stop ${stopIdx + 1} (${targetStop.name}) within 5m radius!`
-      : `📍 Bus arrived at Stop ${stopIdx + 1} (${targetStop.name}) within 5m radius. Registration modal opened.`);
-    lastTriggeredStopRef.current = targetStop.id || stopIdx;
+      ? `🏁 TARGET DESTINATION REACHED: Stop ${stopIdx + 1} (${targetStop.name})${distInfo}! Final terminus reached. Passenger alighting opened.`
+      : `📍 Bus arrived at Stop ${stopIdx + 1} (${targetStop.name})${distInfo}. Passenger registration opened.`);
 
     // Immediately reflect vehicle location at arrived stop to Supabase so passenger app live map & destination detector trigger
     if (Number.isFinite(Number(targetStop.lat)) && Number.isFinite(Number(targetStop.lng))) {
@@ -377,131 +466,169 @@ export function RouteInformationPage() {
     }
   };
 
-  // Process incoming device geolocation fix from navigator.geolocation
-  const processNewGpsPosition = (position) => {
-    if (!position || !position.coords) return;
-    const pLat = position.coords.latitude;
-    const pLng = position.coords.longitude;
-    const speedKmh = position.coords.speed == null ? null : position.coords.speed * 3.6;
+  // Process incoming GPS fix received from G-703 USB receiver connected to Pi 4B (or bridge)
+  const processGpsFix = (fix) => {
+    if (!fix || !fix.fix || fix.lost) return;
+    const pLat = fix.latitude;
+    const pLng = fix.longitude;
+    const speedKmh = fix.speed != null ? fix.speed : null;
 
     setDeviceGps({
       active: true,
       latitude: pLat,
       longitude: pLng,
-      accuracy: position.coords.accuracy,
+      accuracy: fix.accuracy || 5,
       speed: speedKmh,
-      heading: position.coords.heading,
+      heading: fix.heading || null,
+      satellites: fix.satellites || null,
+      altitude: fix.altitude || null,
       error: null,
-      lastUpdated: new Date()
+      lastUpdated: new Date(),
+      source: fix.source || 'g703_receiver',
+      port: fix.port || null
     });
 
     // Broadcast position to Supabase & passenger app
-    broadcastBusGps(pLat, pLng, speedKmh, position.coords.heading, position.coords.accuracy);
+    broadcastBusGps(pLat, pLng, speedKmh, fix.heading || null, fix.accuracy || 5);
 
-    // If trip is active, check proximity to stops (5-meter radius arrival)
-    if (isTripActive && stopsList.length > 0) {
-      const toRadians = (degrees) => degrees * Math.PI / 180;
-      let arrivalStopIndex = -1;
-      let closestDistanceMeters = Infinity;
-
-      for (let index = 0; index < stopsList.length; index += 1) {
-        const stopLat = Number(stopsList[index].lat);
-        const stopLng = Number(stopsList[index].lng);
-        if (!Number.isFinite(stopLat) || !Number.isFinite(stopLng)) continue;
-
-        const latDelta = toRadians(stopLat - pLat);
-        const lngDelta = toRadians(stopLng - pLng);
-        const haversine = Math.sin(latDelta / 2) ** 2
-          + Math.cos(toRadians(pLat)) * Math.cos(toRadians(stopLat)) * Math.sin(lngDelta / 2) ** 2;
-        const distanceMeters = 6371000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
-
-        if (distanceMeters <= ARRIVAL_RADIUS_METERS && distanceMeters < closestDistanceMeters) {
-          arrivalStopIndex = index;
-          closestDistanceMeters = distanceMeters;
-        }
+    // Calculate distances to all stops and evaluate stop progression
+    if (stopsList.length > 0) {
+      const distMap = {};
+      for (let i = 0; i < stopsList.length; i += 1) {
+        const stop = stopsList[i];
+        const d = calculateDistanceMeters(pLat, pLng, Number(stop.lat), Number(stop.lng));
+        distMap[stop.id || `stop-${i + 1}`] = Math.round(d);
+        distMap[i] = Math.round(d);
       }
+      setStopDistances(distMap);
 
-      if (arrivalStopIndex >= 0) {
-        const arrivalStopKey = stopsList[arrivalStopIndex].id || arrivalStopIndex;
-        if (lastTriggeredStopRef.current !== arrivalStopKey) {
-          lastTriggeredStopRef.current = arrivalStopKey;
-          triggerArrivalAtStop(arrivalStopIndex);
+      // Target heading stop (defaults to stop after current)
+      const targetIdx = (headingStopIndex >= 0 && headingStopIndex < stopsList.length)
+        ? headingStopIndex
+        : Math.min(stopsList.length - 1, currentStopIndex + 1);
+
+      const headingStop = stopsList[targetIdx];
+      const distToTarget = headingStop ? calculateDistanceMeters(pLat, pLng, Number(headingStop.lat), Number(headingStop.lng)) : Infinity;
+      setDistanceToHeading(Number.isFinite(distToTarget) ? Math.round(distToTarget) : null);
+
+      if (isTripActive) {
+        const currentStop = stopsList[currentStopIndex];
+        const distToCurrent = currentStop ? calculateDistanceMeters(pLat, pLng, Number(currentStop.lat), Number(currentStop.lng)) : Infinity;
+
+        // 1. ARRIVAL DETECTION: Check if vehicle is within ARRIVAL_RADIUS_METERS of target heading stop
+        if (distToTarget <= ARRIVAL_RADIUS_METERS) {
+          const arrivalKey = headingStop?.id || targetIdx;
+          if (lastTriggeredStopRef.current !== arrivalKey) {
+            lastTriggeredStopRef.current = arrivalKey;
+            triggerArrivalAtStop(targetIdx, distToTarget);
+            return;
+          }
+        }
+
+        // Catch-up check: Did the vehicle reach an upcoming stop further ahead?
+        let catchupIndex = -1;
+        for (let k = targetIdx + 1; k < stopsList.length; k += 1) {
+          const upcoming = stopsList[k];
+          const distUp = calculateDistanceMeters(pLat, pLng, Number(upcoming.lat), Number(upcoming.lng));
+          if (distUp <= ARRIVAL_RADIUS_METERS) {
+            catchupIndex = k;
+            break;
+          }
+        }
+        if (catchupIndex > targetIdx) {
+          const catchupStop = stopsList[catchupIndex];
+          const catchupKey = catchupStop?.id || catchupIndex;
+          if (lastTriggeredStopRef.current !== catchupKey) {
+            lastTriggeredStopRef.current = catchupKey;
+            triggerArrivalAtStop(catchupIndex, calculateDistanceMeters(pLat, pLng, Number(catchupStop.lat), Number(catchupStop.lng)));
+            return;
+          }
+        }
+
+        // 2. APPROACHING DETECTION
+        if (distToTarget <= APPROACH_RADIUS_METERS && tripPhase !== 'at_stop' && tripPhase !== 'approaching') {
+          setTripPhase('approaching');
+          setStatusMessage(`📍 Approaching Stop ${targetIdx + 1}: ${headingStop?.name} (${Math.round(distToTarget)}m away)`);
+        }
+
+        // 3. DEPARTURE DETECTION
+        if (tripPhase === 'at_stop' && distToCurrent > DEPARTURE_RADIUS_METERS) {
+          setTripPhase('in_transit');
         }
       }
     }
   };
 
-  const requestImmediateGpsFix = () => {
-    if (typeof navigator !== 'undefined' && navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          processNewGpsPosition(pos);
-          setStatusMessage(`📍 Live GPS position acquired: ${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`);
-        },
-        (error) => {
-          setDeviceGps(prev => ({ ...prev, error: error.message }));
-          setStatusMessage(`GPS notice: ${error.message}`);
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 }
-      );
-    } else {
-      setStatusMessage('Geolocation is not supported by this browser/device.');
+  const requestImmediateGpsFix = async () => {
+    try {
+      const fix = await fetchLatestBridgeGps();
+      if (fix && fix.fix && !fix.lost && typeof fix.latitude === 'number' && typeof fix.longitude === 'number') {
+        processGpsFix(fix);
+        const src = fix.source === 'g703_serial' ? 'G-703 USB' : (fix.source || 'G-703');
+        const sats = fix.satellites ? ` · ${fix.satellites} satellites` : '';
+        setStatusMessage(`📍 ${src} GPS fix: ${fix.latitude.toFixed(5)}, ${fix.longitude.toFixed(5)}${sats}`);
+      } else {
+        setStatusMessage('G-703 GPS: Waiting for satellite fix or GPS lost (>5s).');
+      }
+    } catch (err) {
+      setStatusMessage(`G-703 GPS query error: ${err.message}`);
+    }
+  };
+
+  // Helper to simulate GPS arrival at the heading stop for desk testing
+  const simulateNextStopArrival = () => {
+    const nextIdx = (headingStopIndex >= 0 && headingStopIndex < stopsList.length)
+      ? headingStopIndex
+      : Math.min(stopsList.length - 1, currentStopIndex + 1);
+    const stop = stopsList[nextIdx];
+    if (stop && Number.isFinite(Number(stop.lat)) && Number.isFinite(Number(stop.lng))) {
+      processGpsFix({
+        fix: true,
+        lost: false,
+        latitude: Number(stop.lat),
+        longitude: Number(stop.lng),
+        speed: 0,
+        heading: 45,
+        satellites: 9,
+        source: 'gps_simulation'
+      });
     }
   };
 
   useEffect(() => {
     resolveBusId();
-  }, [dutySession.plateNumber]);
+  }, [dutySession?.plateNumber]);
 
-  // Geolocation Watcher for Personnel App (Continuous vehicle tracking)
+  // Hardware Bridge GPS Stream Poller from Pi 4B bridge (G-703 USB receiver on Pi 4B)
   useEffect(() => {
     let cancelled = false;
-    let watchId = null;
 
-    if (typeof navigator !== 'undefined' && navigator.geolocation) {
-      // 1. Immediate GPS fix upon duty session / component mount
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          if (!cancelled) processNewGpsPosition(pos);
-        },
-        (err) => {
-          if (!cancelled) {
-            setDeviceGps(prev => ({ ...prev, error: err.message }));
-          }
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 }
-      );
-
-      // 2. Continuous real-time geolocation watching
-      watchId = navigator.geolocation.watchPosition(
-        (pos) => {
-          if (!cancelled) processNewGpsPosition(pos);
-        },
-        (err) => {
-          if (!cancelled) {
-            setDeviceGps(prev => ({ ...prev, error: err.message }));
-          }
-        },
-        { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
-      );
-    }
-
-    // 3. Hardware Bridge GPS Poller from Pi 3B / Pi 4B bridge (if connected on bus)
     const bridgeGpsTimer = setInterval(async () => {
       if (cancelled) return;
       const fix = await fetchLatestBridgeGps();
-      if (!fix || !fix.fix || fix.latitude == null || fix.longitude == null) return;
-      broadcastBusGps(fix.latitude, fix.longitude, fix.speed, fix.heading, fix.accuracy);
-    }, 2500);
+      if (cancelled) return;
+
+      if (fix && fix.fix && !fix.lost && typeof fix.latitude === 'number' && typeof fix.longitude === 'number') {
+        processGpsFix(fix);
+      } else {
+        // Treat data older than 5 seconds or missing fix as "GPS lost"
+        setDeviceGps((prev) => {
+          if (!prev.active && prev.error === 'GPS lost') return prev;
+          return {
+            ...prev,
+            active: false,
+            error: fix?.lost ? 'GPS lost' : (fix?.error || 'GPS lost'),
+            lastUpdated: new Date()
+          };
+        });
+      }
+    }, 1000); // 1 Hz matching G-703 GPS stream
 
     return () => {
       cancelled = true;
-      if (watchId !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
-        navigator.geolocation.clearWatch(watchId);
-      }
       clearInterval(bridgeGpsTimer);
     };
-  }, [isTripActive, stopsList, dutySession.plateNumber]);
+  }, [isTripActive, stopsList, headingStopIndex, currentStopIndex, tripPhase, dutySession?.plateNumber]);
 
   // Keep a stable ref so keyboard event listener doesn't re-create repeatedly
   const handleQrScanRef = useRef(null);
@@ -655,7 +782,7 @@ export function RouteInformationPage() {
             updated_at: now
           };
           localStorage.setItem('qcbus_live_occupancy', JSON.stringify(liveOcc));
-        } catch (_) { }
+        } catch (_) {}
         return nextRows;
       });
 
@@ -666,8 +793,8 @@ export function RouteInformationPage() {
           boarded_at: updatedJourney.boarded_at,
           alighted_at: updatedJourney.alighted_at,
           updated_at: now
-        }).or(`qr_token.eq."${token}",id.eq."${token}"`).then(() => { }).catch(() => { });
-      } catch (_) { }
+        }).or(`qr_token.eq."${token}",id.eq."${token}"`).then(() => {}).catch(() => {});
+      } catch (_) {}
 
       setStatusMessage(nextEventType === 'board'
         ? `✓ ${count} passenger${count === 1 ? '' : 's'} boarded (${cat}). Total Onboard: ${totalOnboard + count}/${capacity}. Boarded at: ${resolvedOrigin.name} → Destination: ${resolvedDestination.name}.`
@@ -741,7 +868,7 @@ export function RouteInformationPage() {
           updated_at: now
         };
         localStorage.setItem('qcbus_live_occupancy', JSON.stringify(liveOcc));
-      } catch (_) { }
+      } catch (_) {}
       return nextRows;
     });
 
@@ -772,11 +899,11 @@ export function RouteInformationPage() {
         updated_at: now
       };
       if (journey.id && isUuid(journey.id)) {
-        supabase.from('passenger_journeys').update(updateData).or(`id.eq."${journey.id}",qr_token.eq."${token}"`).catch(() => { });
+        supabase.from('passenger_journeys').update(updateData).or(`id.eq."${journey.id}",qr_token.eq."${token}"`).catch(() => {});
       } else if (token) {
-        supabase.from('passenger_journeys').update(updateData).eq('qr_token', token).catch(() => { });
+        supabase.from('passenger_journeys').update(updateData).eq('qr_token', token).catch(() => {});
       }
-    } catch (_) { }
+    } catch (_) {}
 
     await recordBoardingEvent({
       tripId: effectiveTripId,
@@ -851,9 +978,15 @@ export function RouteInformationPage() {
     };
   }, []);
 
-  // Start / Restart Another Trip Handler
-  const handleStartAnotherTrip = async (forceNewTrip = false) => {
-    setStatusMessage(forceNewTrip ? 'Starting a new trip…' : 'Starting trip…');
+  // Start Trip Handler (Rule 1: POST /api/trip/start {"direction": "Northbound" | "Southbound"})
+  // Rule 4: Send trip commands only after confirming the 3B is online.
+  const handleStartTrip = async (forceNewTrip = false) => {
+    // If Pi 3B is offline, log notice but allow local G-703 GPS-guided trip
+    if (!announcerInfo.online && !isTestMode) {
+      console.info('Pi 3B Announcer offline; proceeding with local G-703 GPS-guided trip on Pi 4B.');
+    }
+
+    setStatusMessage(forceNewTrip ? 'Starting a new trip…' : `Starting trip (${direction})…`);
     let activeTripId;
     try {
       activeTripId = await ensureOperationalTrip();
@@ -865,33 +998,71 @@ export function RouteInformationPage() {
         updateDutySession({ tripId: activeTripId, tripDirection: direction });
       }
     } catch (error) {
-      setStatusMessage(`Trip start failed: ${error.message}`);
-      return;
+      console.warn('Trip setup warning:', error.message);
     }
+
     localStorage.removeItem(tripSegmentKey);
     setTripSegmentStartedAt(0);
     setPassengerRegistry([]);
-    lastTriggeredStopRef.current = null;
+    lastTriggeredStopRef.current = stopsList[0]?.id || 0;
+    lastTripsDoneRef.current = announcerInfo.state?.trips_done ?? 0;
     setCurrentStopIndex(0);
+    setHeadingStopIndex(1);
+    setTripPhase('waiting');
+    setDistanceToHeading(null);
     setIsTripActive(true);
     if (forceNewTrip) setTripCount((prev) => prev + 1);
 
-    // Relay trip direction to Pi 3B Announcer via Pi 4B bridge (force ends any prior active trip)
-    const bridgeRes = await sendDirectionToBridge(direction, { force: true });
-    const announcerNote = bridgeRes.success
-      ? '✓ Pi 3B Announcer started'
-      : `(Pi 3B notice: ${bridgeRes.error})`;
+    // Send Start Trip command to Pi 3B if online
+    if (announcerInfo.online) {
+      const bridgeRes = await sendTripStart(direction, { force: forceNewTrip });
+      const displayedTrip = forceNewTrip ? tripCount + 1 : tripCount;
 
-    const displayedTrip = forceNewTrip ? tripCount + 1 : tripCount;
-    setStatusMessage(`Trip #${displayedTrip} (${direction}) started at ${stopsList[0].name}. ${announcerNote}`);
+      if (bridgeRes.ok || bridgeRes.success) {
+        setStatusMessage(`✓ Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. G-703 GPS & Announcer active.`);
+      } else if (bridgeRes.conflict || bridgeRes.status === 409) {
+        setIsTripActive(true);
+        setStatusMessage(`ℹ️ Trip is already active on Pi 3B (${direction}) — continuing active trip.`);
+      } else {
+        setStatusMessage(`Trip started with G-703 GPS tracking. (Notice: ${bridgeRes.error || 'Bridge notice'})`);
+      }
+    } else {
+      const displayedTrip = forceNewTrip ? tripCount + 1 : tripCount;
+      setStatusMessage(`✓ Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. G-703 GPS tracking active.`);
+    }
+
     setTimeout(() => setStatusMessage(null), 6000);
   };
 
-  const handlePauseTrip = async () => {
+  // End Trip Handler
+  const handleEndTrip = async () => {
+    setStatusMessage('Ending trip...');
     setIsTripActive(false);
-    await endTripOnBridge();
-    setStatusMessage('Trip paused. Pi 3B Bus Announcer set to standby.');
+    setTripPhase('idle');
+    setDistanceToHeading(null);
+
+    // Send HTTP POST /api/trip/end {} to Pi 3B if online
+    if (announcerInfo.online) {
+      const bridgeRes = await sendTripEnd();
+      if (bridgeRes.ok || bridgeRes.success) {
+        setStatusMessage('✓ Trip ended. Announcer set to standby.');
+      } else {
+        setStatusMessage(`Trip ended. (${bridgeRes.error || 'Standby'})`);
+      }
+    } else {
+      setStatusMessage('✓ Trip ended. System set to standby.');
+    }
+
+    // Prompt to alight any remaining onboard passengers
+    const remainingOnboard = passengerRegistry.filter((j) => j.status === 'boarded').length;
+    if (remainingOnboard > 0) {
+      setShowManualRegistration(true);
+    }
   };
+
+  // Alias for starting next trip
+  const handleStartAnotherTrip = () => handleStartTrip(true);
+  const handlePauseTrip = handleEndTrip;
 
   const handleAlightCurrentStopPassengers = async () => {
     const targetCanonical = resolveRoute4Stop(currentStop.name)?.name || currentStop.name;
@@ -920,7 +1091,7 @@ export function RouteInformationPage() {
         const plate = dutySession?.plateNumber || 'QC-BUS';
         const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
         localStorage.setItem(key, JSON.stringify(next));
-      } catch (_) { }
+      } catch (_) {}
       return next;
     });
 
@@ -933,7 +1104,7 @@ export function RouteInformationPage() {
         supabase.from('passenger_journeys')
           .update({ status: 'completed', alighted_at: now })
           .eq('id', journey.id)
-          .catch(() => { });
+          .catch(() => {});
         if (activeTripId) {
           recordBoardingEvent({
             tripId: activeTripId,
@@ -941,7 +1112,7 @@ export function RouteInformationPage() {
             method: 'dashboard',
             journeyId: journey.id,
             idempotencyKey: `alight-${journey.id}-${Date.now()}`
-          }).catch(() => { });
+          }).catch(() => {});
         }
       }
     }
@@ -960,7 +1131,7 @@ export function RouteInformationPage() {
         const plate = dutySession?.plateNumber || 'QC-BUS';
         const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
         localStorage.setItem(key, JSON.stringify(next));
-      } catch (_) { }
+      } catch (_) {}
       return next;
     });
 
@@ -1056,7 +1227,7 @@ export function RouteInformationPage() {
         const plate = dutySession?.plateNumber || 'QC-BUS';
         const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
         localStorage.setItem(key, JSON.stringify(next));
-      } catch (_) { }
+      } catch (_) {}
       return next;
     });
 
@@ -1082,20 +1253,15 @@ export function RouteInformationPage() {
     manualSubmissionRef.current = false;
   };
 
-  const handleDirectionToggle = async (newDir) => {
+  // Rule 1: "Selecting a direction in the UI should only store it. Send the request when Start Trip is pressed."
+  const handleDirectionToggle = (newDir) => {
+    if (newDir !== 'Northbound' && newDir !== 'Southbound') return;
     lastTriggeredStopRef.current = null;
     setDirection(newDir);
     setCurrentStopIndex(0);
-    setIsTripActive(false);
+    setHeadingStopIndex(1);
     updateDutySession({ tripDirection: newDir });
-
-    // Send direction command to Pi 3B Bus Announcer
-    const res = await sendDirectionToBridge(newDir);
-    if (res.success) {
-      setStatusMessage(`Direction updated to ${newDir}. Sent ${newDir} command to Pi 3B Announcer.`);
-    } else {
-      setStatusMessage(`Direction updated to ${newDir}. Click "Start Trip" to begin. (Pi 3B: ${res.error})`);
-    }
+    setStatusMessage(`Direction selected: ${newDir}. Click "Start Trip" to start announcer.`);
   };
 
   // Format Time: Hours and Minutes ONLY (e.g. "10:30 AM")
@@ -1121,11 +1287,34 @@ export function RouteInformationPage() {
                   {isTripActive ? <><span className="pulse-dot"></span> TRIP #{tripCount} IN PROGRESS</> : `IDLE (TRIP #${tripCount})`}
                 </span>
                 {announcerInfo.online ? (
-                  <span className="badge badge-success" style={{ fontSize: '0.72rem', padding: '0.15rem 0.5rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }} title="Pi 3B Bus Announcer is connected and responsive">
-                    <Volume2 size={12} /> Pi 3B Announcer Online
+                  <span
+                    className="badge badge-success"
+                    style={{
+                      fontSize: '0.72rem',
+                      padding: '0.15rem 0.5rem',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.25rem'
+                    }}
+                    title="Pi 3B Bus Announcer is connected and responsive"
+                  >
+                    <Volume2 size={12} /> ✓ Pi 3B Announcer Online
                   </span>
                 ) : (
-                  <span className="badge" style={{ fontSize: '0.72rem', padding: '0.15rem 0.5rem', backgroundColor: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid #ef4444', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }} title="Pi 3B Announcer unreachable or bridge offline">
+                  <span
+                    className="badge"
+                    style={{
+                      fontSize: '0.72rem',
+                      padding: '0.15rem 0.5rem',
+                      backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                      color: '#f87171',
+                      border: '1px solid #ef4444',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.25rem'
+                    }}
+                    title="Pi 3B Announcer unreachable or bridge offline"
+                  >
                     <VolumeX size={12} /> Pi 3B Announcer Offline
                   </span>
                 )}
@@ -1137,26 +1326,50 @@ export function RouteInformationPage() {
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: '0.25rem',
-                    backgroundColor: deviceGps.active ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
-                    color: deviceGps.active ? '#34d399' : '#f59e0b',
-                    border: `1px solid ${deviceGps.active ? '#10b981' : '#f59e0b'}`
+                    backgroundColor: deviceGps.active
+                      ? 'rgba(16, 185, 129, 0.15)'
+                      : (deviceGps.error === 'GPS lost' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(245, 158, 11, 0.15)'),
+                    color: deviceGps.active
+                      ? '#34d399'
+                      : (deviceGps.error === 'GPS lost' ? '#f87171' : '#f59e0b'),
+                    border: `1px solid ${deviceGps.active ? '#10b981' : (deviceGps.error === 'GPS lost' ? '#ef4444' : '#f59e0b')}`
                   }}
-                  title={deviceGps.active ? `Live GPS position broadcasting to passenger app: ${deviceGps.latitude?.toFixed(5)}, ${deviceGps.longitude?.toFixed(5)}` : 'Waiting for device geolocation signal'}
+                  title={deviceGps.active ? `Live G-703 GPS position: ${deviceGps.latitude?.toFixed(5)}, ${deviceGps.longitude?.toFixed(5)} (${deviceGps.source || 'G-703'}${deviceGps.satellites ? ` · ${deviceGps.satellites} satellites` : ''})` : (deviceGps.error || 'Acquiring G-703 GPS fix')}
                 >
                   <MapPin size={12} />
                   {deviceGps.active
-                    ? `🛰️ Live GPS Active (${deviceGps.speed ? `${deviceGps.speed.toFixed(1)} km/h` : 'Locked'})`
-                    : (deviceGps.error ? `🛰️ GPS: ${deviceGps.error}` : '🛰️ GPS: Acquiring...')}
+                    ? `🛰️ G-703 GPS Active (${deviceGps.speed ? `${deviceGps.speed.toFixed(1)} km/h` : 'Locked'}${deviceGps.satellites ? ` · ${deviceGps.satellites} sats` : ''})`
+                    : (deviceGps.error === 'GPS lost' ? '🛰️ G-703: Lost (>5s)' : (deviceGps.error ? `🛰️ G-703: ${deviceGps.error}` : '🛰️ G-703: Acquiring...'))}
                 </span>
                 <button
                   type="button"
                   onClick={requestImmediateGpsFix}
                   className="btn btn-secondary"
                   style={{ padding: '0.12rem 0.45rem', fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
-                  title="Query and broadcast current browser/device geolocation fix to passengers"
+                  title="Poll latest GPS fix from Pi 4 G-703 receiver"
                 >
-                  <RotateCcw size={10} /> Refresh GPS
+                  <RotateCcw size={10} /> Poll G-703 GPS
                 </button>
+                {isTripActive && (
+                  <button
+                    type="button"
+                    onClick={simulateNextStopArrival}
+                    className="btn btn-secondary"
+                    style={{
+                      padding: '0.12rem 0.5rem',
+                      fontSize: '0.7rem',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.25rem',
+                      backgroundColor: 'rgba(6, 182, 212, 0.15)',
+                      border: '1px solid #06b6d4',
+                      color: '#38bdf8'
+                    }}
+                    title="Simulate GPS movement arriving at next stop along Route 4"
+                  >
+                    <Sparkles size={11} /> Simulate Next Stop
+                  </button>
+                )}
                 <strong style={{ fontSize: '1.05rem', color: 'var(--text-main)' }}>QC Bus Route 4</strong>
               </div>
               <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
@@ -1169,7 +1382,7 @@ export function RouteInformationPage() {
               </div>
             </div>
 
-            {/* NORTHBOUND & SOUTHBOUND OPTIONS & HARDWARE SCANNER INPUT */}
+            {/* NORTHBOUND & SOUTHBOUND OPTIONS & START/END TRIP BUTTONS */}
             <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', gap: '0.25rem', backgroundColor: 'var(--bg-subtle)', padding: '0.2rem', borderRadius: '6px', border: '1px solid var(--border-color)', width: 'fit-content' }}>
                 <button
@@ -1177,6 +1390,7 @@ export function RouteInformationPage() {
                   onClick={() => handleDirectionToggle('Northbound')}
                   className={`btn ${direction === 'Northbound' ? 'btn-primary' : 'btn-secondary'}`}
                   style={{ padding: '0.2rem 0.65rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+                  title="Store Northbound direction (sends to 3B when Start Trip is clicked)"
                 >
                   Northbound <ArrowUp size={12} />
                 </button>
@@ -1185,10 +1399,55 @@ export function RouteInformationPage() {
                   onClick={() => handleDirectionToggle('Southbound')}
                   className={`btn ${direction === 'Southbound' ? 'btn-primary' : 'btn-secondary'}`}
                   style={{ padding: '0.2rem 0.65rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+                  title="Store Southbound direction (sends to 3B when Start Trip is clicked)"
                 >
                   Southbound <ArrowDown size={12} />
                 </button>
               </div>
+
+              {/* START TRIP / END TRIP TRIGGER BUTTONS (RULE 1) */}
+              {!isTripActive ? (
+                <button
+                  type="button"
+                  onClick={() => handleStartTrip(false)}
+                  className="btn btn-primary"
+                  style={{
+                    padding: '0.22rem 0.85rem',
+                    fontSize: '0.76rem',
+                    fontWeight: 800,
+                    backgroundColor: '#10b981',
+                    borderColor: '#10b981',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                    boxShadow: '0 0 10px rgba(16, 185, 129, 0.4)'
+                  }}
+                  title={`Start ${direction} trip and send POST /api/trip/start to Pi 3B Announcer`}
+                >
+                  <Play size={12} fill="currentColor" /> Start Trip ({direction})
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleEndTrip}
+                  className="btn"
+                  style={{
+                    padding: '0.22rem 0.85rem',
+                    fontSize: '0.76rem',
+                    fontWeight: 800,
+                    backgroundColor: '#ef4444',
+                    borderColor: '#ef4444',
+                    color: '#ffffff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                    boxShadow: '0 0 10px rgba(239, 68, 68, 0.4)'
+                  }}
+                  title="End active trip and send POST /api/trip/end to Pi 3B Announcer"
+                >
+                  <Square size={12} fill="currentColor" /> End Trip
+                </button>
+              )}
 
               <button
                 type="button"
@@ -1272,6 +1531,30 @@ export function RouteInformationPage() {
               <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block' }}>CURRENT STOP</span>
               <strong style={{ fontSize: '0.95rem', color: '#06b6d4', fontVariantNumeric: 'tabular-nums' }}>
                 Stop {currentStopIndex + 1}/{stopsList.length}
+              </strong>
+            </div>
+
+            {/* Next Stop Proximity Distance */}
+            <div style={{
+              textAlign: 'center',
+              padding: '0.3rem 0.6rem',
+              backgroundColor: tripPhase === 'approaching' ? 'rgba(6, 182, 212, 0.2)' : 'rgba(15, 23, 42, 0.6)',
+              border: '1px solid',
+              borderColor: tripPhase === 'approaching' ? '#38bdf8' : 'rgba(255, 255, 255, 0.1)',
+              borderRadius: '6px',
+              minWidth: '120px'
+            }}>
+              <span style={{ fontSize: '0.68rem', color: tripPhase === 'approaching' ? '#38bdf8' : 'var(--text-muted)', fontWeight: 700, display: 'block' }}>
+                {tripPhase === 'approaching' ? 'APPROACHING NEXT' : 'NEXT STOP DIST'}
+              </span>
+              <strong style={{
+                fontSize: '1.05rem',
+                color: distanceToHeading != null
+                  ? (distanceToHeading <= 40 ? '#10b981' : (distanceToHeading <= 140 ? '#38bdf8' : '#e0f2fe'))
+                  : '#94a3b8',
+                fontVariantNumeric: 'tabular-nums'
+              }}>
+                {distanceToHeading != null ? `${distanceToHeading} m` : (deviceGps.active ? 'At Terminal' : '—')}
               </strong>
             </div>
 
@@ -1498,7 +1781,9 @@ export function RouteInformationPage() {
         }}>
           {stopsList.map((s, idx) => {
             const isCurrent = idx === currentStopIndex;
+            const isHeading = idx === headingStopIndex && idx !== currentStopIndex;
             const isPassed = idx < currentStopIndex;
+            const stopDist = stopDistances[idx] ?? stopDistances[s.id];
             const boardedCount = passengersBoardedAt(s.name);
             const alightingCount = passengersAlightingAt(s.name);
             const completedAlightedCount = passengersCompletedAlightedAt(s.name);
@@ -1513,34 +1798,57 @@ export function RouteInformationPage() {
                   padding: '0.55rem',
                   borderRadius: '8px',
                   cursor: 'pointer',
-                  border: isCurrent ? '3px solid #10b981' : (isPassed ? '1px solid rgba(255, 255, 255, 0.05)' : '1px solid var(--border-color)'),
-                  backgroundColor: isCurrent ? 'rgba(16, 185, 129, 0.25)' : (isPassed ? 'rgba(15, 23, 42, 0.55)' : 'var(--bg-card)'),
+                  border: isCurrent
+                    ? '3px solid #10b981'
+                    : (isHeading
+                      ? '2px solid #06b6d4'
+                      : (isPassed ? '1px solid rgba(255, 255, 255, 0.05)' : '1px solid var(--border-color)')),
+                  backgroundColor: isCurrent
+                    ? 'rgba(16, 185, 129, 0.25)'
+                    : (isHeading
+                      ? 'rgba(6, 182, 212, 0.18)'
+                      : (isPassed ? 'rgba(15, 23, 42, 0.55)' : 'var(--bg-card)')),
                   opacity: isPassed ? 0.65 : 1,
                   filter: isPassed ? 'grayscale(0.35)' : 'none',
                   transition: 'all 0.25s ease',
                   display: 'flex',
                   flexDirection: 'column',
                   justifyContent: 'space-between',
-                  boxShadow: isCurrent ? '0 0 14px rgba(16, 185, 129, 0.4)' : 'none'
+                  boxShadow: isCurrent
+                    ? '0 0 14px rgba(16, 185, 129, 0.4)'
+                    : (isHeading ? '0 0 10px rgba(6, 182, 212, 0.35)' : 'none')
                 }}
               >
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
                     <span style={{
-                      fontSize: '0.75rem',
+                      fontSize: '0.72rem',
                       fontWeight: 800,
-                      backgroundColor: isCurrent ? '#10b981' : (isPassed ? '#475569' : '#0284c7'),
+                      backgroundColor: isCurrent ? '#10b981' : (isHeading ? '#06b6d4' : (isPassed ? '#475569' : '#0284c7')),
                       color: '#ffffff',
                       padding: '0.15rem 0.45rem',
                       borderRadius: '4px'
                     }}>
-                      STOP {idx + 1}
+                      {isCurrent ? `STOP ${idx + 1} · CURRENT` : (isHeading ? `STOP ${idx + 1} · NEXT ➔` : `STOP ${idx + 1}`)}
                     </span>
+                    {stopDist != null && (
+                      <span style={{
+                        fontSize: '0.68rem',
+                        fontWeight: 700,
+                        color: isCurrent ? '#34d399' : (isHeading ? '#38bdf8' : (isPassed ? '#64748b' : '#94a3b8')),
+                        backgroundColor: isCurrent ? 'rgba(16, 185, 129, 0.18)' : (isHeading ? 'rgba(6, 182, 212, 0.18)' : 'rgba(255, 255, 255, 0.04)'),
+                        padding: '0.12rem 0.38rem',
+                        borderRadius: '4px',
+                        border: isHeading ? '1px solid rgba(6, 182, 212, 0.4)' : (isCurrent ? '1px solid rgba(16, 185, 129, 0.4)' : 'none')
+                      }}>
+                        {isCurrent ? '✓ At Stop' : (isHeading ? `➔ ${stopDist}m` : (isPassed ? 'Passed' : `${stopDist}m`))}
+                      </span>
+                    )}
                   </div>
                   <div style={{
                     fontWeight: 700,
                     fontSize: '0.85rem',
-                    color: isCurrent ? '#34d399' : (isPassed ? '#94a3b8' : 'var(--text-main)'),
+                    color: isCurrent ? '#34d399' : (isHeading ? '#38bdf8' : (isPassed ? '#94a3b8' : 'var(--text-main)')),
                     lineHeight: 1.35,
                     display: '-webkit-box',
                     WebkitLineClamp: 2,
@@ -1618,16 +1926,72 @@ export function RouteInformationPage() {
             <Users size={16} /> Register Passengers (Stop {currentStopIndex + 1})
           </button>
 
-          {/* GPS arrivals open the manual registration popup automatically. */}
+          {!isTripActive ? (
+            <button
+              type="button"
+              onClick={() => handleStartTrip(false)}
+              className="btn btn-primary"
+              style={{
+                justifyContent: 'center',
+                padding: '0.45rem 1.15rem',
+                fontSize: '0.88rem',
+                fontWeight: 800,
+                backgroundColor: '#10b981',
+                borderColor: '#10b981',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.4rem',
+                boxShadow: '0 0 12px rgba(16, 185, 129, 0.35)'
+              }}
+              title={`Start ${direction} trip and send command to Pi 3B`}
+            >
+              <Play size={16} fill="currentColor" /> Start Trip ({direction})
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={handleEndTrip}
+                className="btn"
+                style={{
+                  justifyContent: 'center',
+                  padding: '0.45rem 1.15rem',
+                  fontSize: '0.88rem',
+                  fontWeight: 800,
+                  backgroundColor: '#ef4444',
+                  borderColor: '#ef4444',
+                  color: '#ffffff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  boxShadow: '0 0 12px rgba(239, 68, 68, 0.35)'
+                }}
+                title="End active trip and send command to Pi 3B"
+              >
+                <Square size={16} fill="currentColor" /> End Trip
+              </button>
 
-          <button
-            type="button"
-            onClick={() => handleStartAnotherTrip(true)}
-            className="btn btn-primary"
-            style={{ justifyContent: 'center', padding: '0.45rem 1rem', fontSize: '0.88rem', fontWeight: 800, backgroundColor: '#10b981', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
-          >
-            <RotateCcw size={16} /> Start Another Trip
-          </button>
+              <button
+                type="button"
+                onClick={() => handleStartTrip(true)}
+                className="btn btn-primary"
+                style={{
+                  justifyContent: 'center',
+                  padding: '0.45rem 1rem',
+                  fontSize: '0.88rem',
+                  fontWeight: 800,
+                  backgroundColor: '#0284c7',
+                  borderColor: '#0284c7',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem'
+                }}
+                title="Begin next trip loop"
+              >
+                <RotateCcw size={16} /> Start Another Trip
+              </button>
+            </>
+          )}
         </div>
       </div>
 

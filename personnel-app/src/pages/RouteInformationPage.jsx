@@ -76,7 +76,7 @@ export function RouteInformationPage() {
   });
   const [operationalTripId, setOperationalTripId] = useState(null);
 
-  // Real-time Vehicle Device Geolocation State
+  // Real-time Vehicle Device Geolocation State (from G-703 USB receiver on Pi 4B)
   const [deviceGps, setDeviceGps] = useState({
     active: false,
     latitude: null,
@@ -84,10 +84,18 @@ export function RouteInformationPage() {
     accuracy: null,
     speed: null,
     heading: null,
+    satellites: null,
+    altitude: null,
     error: null,
     lastUpdated: null,
-    source: null
+    source: null,
+    port: null
   });
+
+  // GPS Matching & Stop Progression State
+  const [stopDistances, setStopDistances] = useState({});
+  const [distanceToHeading, setDistanceToHeading] = useState(null);
+  const [tripPhase, setTripPhase] = useState('idle'); // 'idle' | 'waiting' | 'in_transit' | 'approaching' | 'at_stop' | 'completed'
 
   // Pi 3B Bus Announcer Connection & State (Rule 2: GET /api/state every 2 to 3 seconds)
   const [announcerInfo, setAnnouncerInfo] = useState({
@@ -289,7 +297,19 @@ export function RouteInformationPage() {
   // Match GPS fixes against every stop so missed or out-of-order arrivals can recover.
   const lastTriggeredStopRef = useRef(null);
   const busIdRef = useRef(null);
-  const ARRIVAL_RADIUS_METERS = 5; // 5-meter radius trigger for all stops & target destination
+  const ARRIVAL_RADIUS_METERS = 40; // 40-meter radius trigger for realistic GPS stop arrival
+  const APPROACH_RADIUS_METERS = 140; // 140-meter radius for "approaching stop" detection
+  const DEPARTURE_RADIUS_METERS = 50; // 50-meter departure threshold from current stop
+
+  const calculateDistanceMeters = (lat1, lon1, lat2, lon2) => {
+    if (!Number.isFinite(lat1) || !Number.isFinite(lon1) || !Number.isFinite(lat2) || !Number.isFinite(lon2)) return Infinity;
+    const R = 6371000;
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
 
   const ensureOperationalTrip = async () => {
     if (dutySession.plateNumber) {
@@ -408,21 +428,37 @@ export function RouteInformationPage() {
     return publishCurrentBusLocation(bId, payload);
   };
 
-  const triggerArrivalAtStop = (stopIdx) => {
+  const triggerArrivalAtStop = (stopIdx, currentDistance = null) => {
     if (stopIdx < 0 || stopIdx >= stopsList.length) return;
     const targetStop = stopsList[stopIdx];
-    const isTargetDestination = stopIdx === stopsList.length - 1;
+    const isTargetDestination = (stopIdx === stopsList.length - 1);
+
     setCurrentStopIndex(stopIdx);
+    if (stopIdx < stopsList.length - 1) {
+      setHeadingStopIndex(stopIdx + 1);
+      setTripPhase('at_stop');
+    } else {
+      setHeadingStopIndex(stopIdx);
+      setTripPhase('completed');
+    }
+
+    lastTriggeredStopRef.current = targetStop.id || stopIdx;
+
     if (!isTripActive) {
       setStatusMessage('Start the trip before registering passengers at a stop.');
       return;
     }
+
     setShowManualRegistration(true);
     setManualDestination(stopsList[stopIdx + 1]?.name || '');
+
+    const distInfo = (currentDistance != null && Number.isFinite(currentDistance))
+      ? ` (${Math.round(currentDistance)}m GPS proximity)`
+      : '';
+
     setStatusMessage(isTargetDestination
-      ? `🏁 TARGET DESTINATION REACHED: Stop ${stopIdx + 1} (${targetStop.name}) within 5m radius!`
-      : `📍 Bus arrived at Stop ${stopIdx + 1} (${targetStop.name}) within 5m radius. Registration modal opened.`);
-    lastTriggeredStopRef.current = targetStop.id || stopIdx;
+      ? `🏁 TARGET DESTINATION REACHED: Stop ${stopIdx + 1} (${targetStop.name})${distInfo}! Final terminus reached. Passenger alighting opened.`
+      : `📍 Bus arrived at Stop ${stopIdx + 1} (${targetStop.name})${distInfo}. Passenger registration opened.`);
 
     // Immediately reflect vehicle location at arrived stop to Supabase so passenger app live map & destination detector trigger
     if (Number.isFinite(Number(targetStop.lat)) && Number.isFinite(Number(targetStop.lng))) {
@@ -430,9 +466,8 @@ export function RouteInformationPage() {
     }
   };
 
-  // Process incoming GPS fix received from Pi 3B (UDP 5005 via bridge)
-  // Pi 3B sends the GPS signal to Pi 4B; Pi 4B only receives it.
-  const processPi3bGpsFix = (fix) => {
+  // Process incoming GPS fix received from G-703 USB receiver connected to Pi 4B (or bridge)
+  const processGpsFix = (fix) => {
     if (!fix || !fix.fix || fix.lost) return;
     const pLat = fix.latitude;
     const pLng = fix.longitude;
@@ -445,42 +480,80 @@ export function RouteInformationPage() {
       accuracy: fix.accuracy || 5,
       speed: speedKmh,
       heading: fix.heading || null,
+      satellites: fix.satellites || null,
+      altitude: fix.altitude || null,
       error: null,
       lastUpdated: new Date(),
-      source: 'pi3b_udp'
+      source: fix.source || 'g703_receiver',
+      port: fix.port || null
     });
 
     // Broadcast position to Supabase & passenger app
     broadcastBusGps(pLat, pLng, speedKmh, fix.heading || null, fix.accuracy || 5);
 
-    // If trip is active, check proximity to stops (5-meter radius arrival)
-    if (isTripActive && stopsList.length > 0) {
-      const toRadians = (degrees) => degrees * Math.PI / 180;
-      let arrivalStopIndex = -1;
-      let closestDistanceMeters = Infinity;
-
-      for (let index = 0; index < stopsList.length; index += 1) {
-        const stopLat = Number(stopsList[index].lat);
-        const stopLng = Number(stopsList[index].lng);
-        if (!Number.isFinite(stopLat) || !Number.isFinite(stopLng)) continue;
-
-        const latDelta = toRadians(stopLat - pLat);
-        const lngDelta = toRadians(stopLng - pLng);
-        const haversine = Math.sin(latDelta / 2) ** 2
-          + Math.cos(toRadians(pLat)) * Math.cos(toRadians(stopLat)) * Math.sin(lngDelta / 2) ** 2;
-        const distanceMeters = 6371000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
-
-        if (distanceMeters <= ARRIVAL_RADIUS_METERS && distanceMeters < closestDistanceMeters) {
-          arrivalStopIndex = index;
-          closestDistanceMeters = distanceMeters;
-        }
+    // Calculate distances to all stops and evaluate stop progression
+    if (stopsList.length > 0) {
+      const distMap = {};
+      for (let i = 0; i < stopsList.length; i += 1) {
+        const stop = stopsList[i];
+        const d = calculateDistanceMeters(pLat, pLng, Number(stop.lat), Number(stop.lng));
+        distMap[stop.id || `stop-${i + 1}`] = Math.round(d);
+        distMap[i] = Math.round(d);
       }
+      setStopDistances(distMap);
 
-      if (arrivalStopIndex >= 0) {
-        const arrivalStopKey = stopsList[arrivalStopIndex].id || arrivalStopIndex;
-        if (lastTriggeredStopRef.current !== arrivalStopKey) {
-          lastTriggeredStopRef.current = arrivalStopKey;
-          triggerArrivalAtStop(arrivalStopIndex);
+      // Target heading stop (defaults to stop after current)
+      const targetIdx = (headingStopIndex >= 0 && headingStopIndex < stopsList.length)
+        ? headingStopIndex
+        : Math.min(stopsList.length - 1, currentStopIndex + 1);
+
+      const headingStop = stopsList[targetIdx];
+      const distToTarget = headingStop ? calculateDistanceMeters(pLat, pLng, Number(headingStop.lat), Number(headingStop.lng)) : Infinity;
+      setDistanceToHeading(Number.isFinite(distToTarget) ? Math.round(distToTarget) : null);
+
+      if (isTripActive) {
+        const currentStop = stopsList[currentStopIndex];
+        const distToCurrent = currentStop ? calculateDistanceMeters(pLat, pLng, Number(currentStop.lat), Number(currentStop.lng)) : Infinity;
+
+        // 1. ARRIVAL DETECTION: Check if vehicle is within ARRIVAL_RADIUS_METERS of target heading stop
+        if (distToTarget <= ARRIVAL_RADIUS_METERS) {
+          const arrivalKey = headingStop?.id || targetIdx;
+          if (lastTriggeredStopRef.current !== arrivalKey) {
+            lastTriggeredStopRef.current = arrivalKey;
+            triggerArrivalAtStop(targetIdx, distToTarget);
+            return;
+          }
+        }
+
+        // Catch-up check: Did the vehicle reach an upcoming stop further ahead?
+        let catchupIndex = -1;
+        for (let k = targetIdx + 1; k < stopsList.length; k += 1) {
+          const upcoming = stopsList[k];
+          const distUp = calculateDistanceMeters(pLat, pLng, Number(upcoming.lat), Number(upcoming.lng));
+          if (distUp <= ARRIVAL_RADIUS_METERS) {
+            catchupIndex = k;
+            break;
+          }
+        }
+        if (catchupIndex > targetIdx) {
+          const catchupStop = stopsList[catchupIndex];
+          const catchupKey = catchupStop?.id || catchupIndex;
+          if (lastTriggeredStopRef.current !== catchupKey) {
+            lastTriggeredStopRef.current = catchupKey;
+            triggerArrivalAtStop(catchupIndex, calculateDistanceMeters(pLat, pLng, Number(catchupStop.lat), Number(catchupStop.lng)));
+            return;
+          }
+        }
+
+        // 2. APPROACHING DETECTION
+        if (distToTarget <= APPROACH_RADIUS_METERS && tripPhase !== 'at_stop' && tripPhase !== 'approaching') {
+          setTripPhase('approaching');
+          setStatusMessage(`📍 Approaching Stop ${targetIdx + 1}: ${headingStop?.name} (${Math.round(distToTarget)}m away)`);
+        }
+
+        // 3. DEPARTURE DETECTION
+        if (tripPhase === 'at_stop' && distToCurrent > DEPARTURE_RADIUS_METERS) {
+          setTripPhase('in_transit');
         }
       }
     }
@@ -490,13 +563,35 @@ export function RouteInformationPage() {
     try {
       const fix = await fetchLatestBridgeGps();
       if (fix && fix.fix && !fix.lost && typeof fix.latitude === 'number' && typeof fix.longitude === 'number') {
-        processPi3bGpsFix(fix);
-        setStatusMessage(`📍 Pi 3B GPS fix: ${fix.latitude.toFixed(4)}, ${fix.longitude.toFixed(4)}`);
+        processGpsFix(fix);
+        const src = fix.source === 'g703_serial' ? 'G-703 USB' : (fix.source || 'G-703');
+        const sats = fix.satellites ? ` · ${fix.satellites} satellites` : '';
+        setStatusMessage(`📍 ${src} GPS fix: ${fix.latitude.toFixed(5)}, ${fix.longitude.toFixed(5)}${sats}`);
       } else {
-        setStatusMessage('Pi 3B GPS: Waiting for signal or GPS lost (>5s).');
+        setStatusMessage('G-703 GPS: Waiting for satellite fix or GPS lost (>5s).');
       }
     } catch (err) {
-      setStatusMessage(`Pi 3B GPS query error: ${err.message}`);
+      setStatusMessage(`G-703 GPS query error: ${err.message}`);
+    }
+  };
+
+  // Helper to simulate GPS arrival at the heading stop for desk testing
+  const simulateNextStopArrival = () => {
+    const nextIdx = (headingStopIndex >= 0 && headingStopIndex < stopsList.length)
+      ? headingStopIndex
+      : Math.min(stopsList.length - 1, currentStopIndex + 1);
+    const stop = stopsList[nextIdx];
+    if (stop && Number.isFinite(Number(stop.lat)) && Number.isFinite(Number(stop.lng))) {
+      processGpsFix({
+        fix: true,
+        lost: false,
+        latitude: Number(stop.lat),
+        longitude: Number(stop.lng),
+        speed: 0,
+        heading: 45,
+        satellites: 9,
+        source: 'gps_simulation'
+      });
     }
   };
 
@@ -504,10 +599,7 @@ export function RouteInformationPage() {
     resolveBusId();
   }, [dutySession?.plateNumber]);
 
-  // Hardware Bridge GPS Stream Poller from Pi 3B -> Pi 4B bridge (UDP 5005)
-  // Pi 3B has the GPS hardware receiver and streams UDP packets to Pi 4B on port 5005.
-  // Pi 4B ONLY receives this stream; it does NOT broadcast or query browser geolocation.
-  // Rule 3: 1Hz stream; treat data older than about 5 seconds as "GPS lost"
+  // Hardware Bridge GPS Stream Poller from Pi 4B bridge (G-703 USB receiver on Pi 4B)
   useEffect(() => {
     let cancelled = false;
 
@@ -517,9 +609,9 @@ export function RouteInformationPage() {
       if (cancelled) return;
 
       if (fix && fix.fix && !fix.lost && typeof fix.latitude === 'number' && typeof fix.longitude === 'number') {
-        processPi3bGpsFix(fix);
+        processGpsFix(fix);
       } else {
-        // Treat data older than 5 seconds or missing fix as "GPS lost" (Rule 3)
+        // Treat data older than 5 seconds or missing fix as "GPS lost"
         setDeviceGps((prev) => {
           if (!prev.active && prev.error === 'GPS lost') return prev;
           return {
@@ -530,13 +622,13 @@ export function RouteInformationPage() {
           };
         });
       }
-    }, 1000); // 1 Hz matching Pi 3B UDP sender
+    }, 1000); // 1 Hz matching G-703 GPS stream
 
     return () => {
       cancelled = true;
       clearInterval(bridgeGpsTimer);
     };
-  }, [isTripActive, stopsList, dutySession?.plateNumber]);
+  }, [isTripActive, stopsList, headingStopIndex, currentStopIndex, tripPhase, dutySession?.plateNumber]);
 
   // Keep a stable ref so keyboard event listener doesn't re-create repeatedly
   const handleQrScanRef = useRef(null);
@@ -889,10 +981,9 @@ export function RouteInformationPage() {
   // Start Trip Handler (Rule 1: POST /api/trip/start {"direction": "Northbound" | "Southbound"})
   // Rule 4: Send trip commands only after confirming the 3B is online.
   const handleStartTrip = async (forceNewTrip = false) => {
-    // 1. Confirm Pi 3B is online per Rule 4
+    // If Pi 3B is offline, log notice but allow local G-703 GPS-guided trip
     if (!announcerInfo.online && !isTestMode) {
-      setStatusMessage('⚠️ Pi 3B Announcer Offline: Cannot start trip until Pi 3B is connected on 192.168.10.3:8080.');
-      return;
+      console.info('Pi 3B Announcer offline; proceeding with local G-703 GPS-guided trip on Pi 4B.');
     }
 
     setStatusMessage(forceNewTrip ? 'Starting a new trip…' : `Starting trip (${direction})…`);
@@ -913,42 +1004,53 @@ export function RouteInformationPage() {
     localStorage.removeItem(tripSegmentKey);
     setTripSegmentStartedAt(0);
     setPassengerRegistry([]);
-    lastTriggeredStopRef.current = null;
+    lastTriggeredStopRef.current = stopsList[0]?.id || 0;
     lastTripsDoneRef.current = announcerInfo.state?.trips_done ?? 0;
     setCurrentStopIndex(0);
     setHeadingStopIndex(1);
+    setTripPhase('waiting');
+    setDistanceToHeading(null);
     setIsTripActive(true);
     if (forceNewTrip) setTripCount((prev) => prev + 1);
 
-    // 2. Send Start Trip HTTP command to Pi 4B bridge -> Pi 3B (192.168.10.3:8080)
-    const bridgeRes = await sendTripStart(direction, { force: forceNewTrip });
-
-    if (bridgeRes.ok || bridgeRes.success) {
+    // Send Start Trip command to Pi 3B if online
+    if (announcerInfo.online) {
+      const bridgeRes = await sendTripStart(direction, { force: forceNewTrip });
       const displayedTrip = forceNewTrip ? tripCount + 1 : tripCount;
-      setStatusMessage(`✓ Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. Pi 3B Announcer active.`);
-    } else if (bridgeRes.conflict || bridgeRes.status === 409) {
-      // Rule 1: 409 a trip is already active (treat as "already running")
-      setIsTripActive(true);
-      setStatusMessage(`ℹ️ Trip is already active on Pi 3B (${direction}) — continuing active trip.`);
+
+      if (bridgeRes.ok || bridgeRes.success) {
+        setStatusMessage(`✓ Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. G-703 GPS & Announcer active.`);
+      } else if (bridgeRes.conflict || bridgeRes.status === 409) {
+        setIsTripActive(true);
+        setStatusMessage(`ℹ️ Trip is already active on Pi 3B (${direction}) — continuing active trip.`);
+      } else {
+        setStatusMessage(`Trip started with G-703 GPS tracking. (Notice: ${bridgeRes.error || 'Bridge notice'})`);
+      }
     } else {
-      setStatusMessage(`Trip started locally. (Notice: ${bridgeRes.error || 'Bridge notice'})`);
+      const displayedTrip = forceNewTrip ? tripCount + 1 : tripCount;
+      setStatusMessage(`✓ Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. G-703 GPS tracking active.`);
     }
 
     setTimeout(() => setStatusMessage(null), 6000);
   };
 
-  // End Trip Handler (Rule 1: POST /api/trip/end {})
+  // End Trip Handler
   const handleEndTrip = async () => {
-    setStatusMessage('Ending trip on Pi 3B Announcer...');
+    setStatusMessage('Ending trip...');
     setIsTripActive(false);
+    setTripPhase('idle');
+    setDistanceToHeading(null);
 
-    // Send HTTP POST /api/trip/end {} to Pi 4B bridge -> Pi 3B
-    const bridgeRes = await sendTripEnd();
-
-    if (bridgeRes.ok || bridgeRes.success) {
-      setStatusMessage('✓ Trip ended. Pi 3B Announcer set to standby.');
+    // Send HTTP POST /api/trip/end {} to Pi 3B if online
+    if (announcerInfo.online) {
+      const bridgeRes = await sendTripEnd();
+      if (bridgeRes.ok || bridgeRes.success) {
+        setStatusMessage('✓ Trip ended. Announcer set to standby.');
+      } else {
+        setStatusMessage(`Trip ended. (${bridgeRes.error || 'Standby'})`);
+      }
     } else {
-      setStatusMessage(`Trip ended. (${bridgeRes.error || 'Standby'})`);
+      setStatusMessage('✓ Trip ended. System set to standby.');
     }
 
     // Prompt to alight any remaining onboard passengers
@@ -1232,22 +1334,42 @@ export function RouteInformationPage() {
                       : (deviceGps.error === 'GPS lost' ? '#f87171' : '#f59e0b'),
                     border: `1px solid ${deviceGps.active ? '#10b981' : (deviceGps.error === 'GPS lost' ? '#ef4444' : '#f59e0b')}`
                   }}
-                  title={deviceGps.active ? `Live GPS position broadcasting to passenger app: ${deviceGps.latitude?.toFixed(5)}, ${deviceGps.longitude?.toFixed(5)}` : (deviceGps.error || 'Acquiring GPS fix')}
+                  title={deviceGps.active ? `Live G-703 GPS position: ${deviceGps.latitude?.toFixed(5)}, ${deviceGps.longitude?.toFixed(5)} (${deviceGps.source || 'G-703'}${deviceGps.satellites ? ` · ${deviceGps.satellites} satellites` : ''})` : (deviceGps.error || 'Acquiring G-703 GPS fix')}
                 >
                   <MapPin size={12} />
                   {deviceGps.active
-                    ? `🛰️ Live GPS Active (${deviceGps.speed ? `${deviceGps.speed.toFixed(1)} km/h` : 'Locked'})`
-                    : (deviceGps.error === 'GPS lost' ? '🛰️ GPS: Lost (>5s)' : (deviceGps.error ? `🛰️ GPS: ${deviceGps.error}` : '🛰️ GPS: Acquiring...'))}
+                    ? `🛰️ G-703 GPS Active (${deviceGps.speed ? `${deviceGps.speed.toFixed(1)} km/h` : 'Locked'}${deviceGps.satellites ? ` · ${deviceGps.satellites} sats` : ''})`
+                    : (deviceGps.error === 'GPS lost' ? '🛰️ G-703: Lost (>5s)' : (deviceGps.error ? `🛰️ G-703: ${deviceGps.error}` : '🛰️ G-703: Acquiring...'))}
                 </span>
                 <button
                   type="button"
                   onClick={requestImmediateGpsFix}
                   className="btn btn-secondary"
                   style={{ padding: '0.12rem 0.45rem', fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
-                  title="Poll latest GPS fix received from Pi 3B hardware stream"
+                  title="Poll latest GPS fix from Pi 4 G-703 receiver"
                 >
-                  <RotateCcw size={10} /> Poll Pi 3B GPS
+                  <RotateCcw size={10} /> Poll G-703 GPS
                 </button>
+                {isTripActive && (
+                  <button
+                    type="button"
+                    onClick={simulateNextStopArrival}
+                    className="btn btn-secondary"
+                    style={{
+                      padding: '0.12rem 0.5rem',
+                      fontSize: '0.7rem',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.25rem',
+                      backgroundColor: 'rgba(6, 182, 212, 0.15)',
+                      border: '1px solid #06b6d4',
+                      color: '#38bdf8'
+                    }}
+                    title="Simulate GPS movement arriving at next stop along Route 4"
+                  >
+                    <Sparkles size={11} /> Simulate Next Stop
+                  </button>
+                )}
                 <strong style={{ fontSize: '1.05rem', color: 'var(--text-main)' }}>QC Bus Route 4</strong>
               </div>
               <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
@@ -1409,6 +1531,30 @@ export function RouteInformationPage() {
               <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block' }}>CURRENT STOP</span>
               <strong style={{ fontSize: '0.95rem', color: '#06b6d4', fontVariantNumeric: 'tabular-nums' }}>
                 Stop {currentStopIndex + 1}/{stopsList.length}
+              </strong>
+            </div>
+
+            {/* Next Stop Proximity Distance */}
+            <div style={{
+              textAlign: 'center',
+              padding: '0.3rem 0.6rem',
+              backgroundColor: tripPhase === 'approaching' ? 'rgba(6, 182, 212, 0.2)' : 'rgba(15, 23, 42, 0.6)',
+              border: '1px solid',
+              borderColor: tripPhase === 'approaching' ? '#38bdf8' : 'rgba(255, 255, 255, 0.1)',
+              borderRadius: '6px',
+              minWidth: '120px'
+            }}>
+              <span style={{ fontSize: '0.68rem', color: tripPhase === 'approaching' ? '#38bdf8' : 'var(--text-muted)', fontWeight: 700, display: 'block' }}>
+                {tripPhase === 'approaching' ? 'APPROACHING NEXT' : 'NEXT STOP DIST'}
+              </span>
+              <strong style={{
+                fontSize: '1.05rem',
+                color: distanceToHeading != null
+                  ? (distanceToHeading <= 40 ? '#10b981' : (distanceToHeading <= 140 ? '#38bdf8' : '#e0f2fe'))
+                  : '#94a3b8',
+                fontVariantNumeric: 'tabular-nums'
+              }}>
+                {distanceToHeading != null ? `${distanceToHeading} m` : (deviceGps.active ? 'At Terminal' : '—')}
               </strong>
             </div>
 
@@ -1637,6 +1783,7 @@ export function RouteInformationPage() {
             const isCurrent = idx === currentStopIndex;
             const isHeading = idx === headingStopIndex && idx !== currentStopIndex;
             const isPassed = idx < currentStopIndex;
+            const stopDist = stopDistances[idx] ?? stopDistances[s.id];
             const boardedCount = passengersBoardedAt(s.name);
             const alightingCount = passengersAlightingAt(s.name);
             const completedAlightedCount = passengersCompletedAlightedAt(s.name);
@@ -1684,6 +1831,19 @@ export function RouteInformationPage() {
                     }}>
                       {isCurrent ? `STOP ${idx + 1} · CURRENT` : (isHeading ? `STOP ${idx + 1} · NEXT ➔` : `STOP ${idx + 1}`)}
                     </span>
+                    {stopDist != null && (
+                      <span style={{
+                        fontSize: '0.68rem',
+                        fontWeight: 700,
+                        color: isCurrent ? '#34d399' : (isHeading ? '#38bdf8' : (isPassed ? '#64748b' : '#94a3b8')),
+                        backgroundColor: isCurrent ? 'rgba(16, 185, 129, 0.18)' : (isHeading ? 'rgba(6, 182, 212, 0.18)' : 'rgba(255, 255, 255, 0.04)'),
+                        padding: '0.12rem 0.38rem',
+                        borderRadius: '4px',
+                        border: isHeading ? '1px solid rgba(6, 182, 212, 0.4)' : (isCurrent ? '1px solid rgba(16, 185, 129, 0.4)' : 'none')
+                      }}>
+                        {isCurrent ? '✓ At Stop' : (isHeading ? `➔ ${stopDist}m` : (isPassed ? 'Passed' : `${stopDist}m`))}
+                      </span>
+                    )}
                   </div>
                   <div style={{
                     fontWeight: 700,

@@ -252,6 +252,10 @@ export async function fetchLatestBridgeGps() {
         speed: data.speed != null ? Number(data.speed) : null,
         heading: data.heading != null ? Number(data.heading) : null,
         accuracy: data.accuracy || 5,
+        satellites: data.satellites != null ? Number(data.satellites) : null,
+        altitude: data.altitude != null ? Number(data.altitude) : null,
+        source: data.source || 'g703',
+        port: data.port || null,
         age_seconds: data.age_seconds,
         status: 'active'
       };
@@ -265,6 +269,9 @@ export async function fetchLatestBridgeGps() {
       timestamp: data.timestamp,
       speed: null,
       heading: null,
+      satellites: data.satellites != null ? Number(data.satellites) : null,
+      source: data.source,
+      port: data.port,
       age_seconds: data.age_seconds,
       status: 'lost',
       error: 'GPS lost'
