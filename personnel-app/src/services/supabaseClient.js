@@ -1159,16 +1159,18 @@ export async function createManualPassengerJourney({
   tripId,
   routeDirection,
   passengerCount = 1,
-  status = 'boarded'
+  status = 'boarded',
+  passId
 }) {
   try {
     const canonicalOrigin = resolveRoute4Stop(origin)?.name || (typeof origin === 'string' ? origin.trim() : 'Quezon City Hall');
     const canonicalDest = resolveRoute4Stop(destination)?.name || (typeof destination === 'string' ? destination.trim() : 'General Luis / Banahaw');
     const count = Math.max(1, Number(passengerCount) || 1);
     const cat = passengerCategory || 'Regular';
+    const anonPassId = passId || ('ANON-' + Math.floor(100000 + Math.random() * 900000));
 
     const payload = {
-      passenger_name: (passengerName && passengerName.trim()) || `Anonymous Passenger (${cat})`,
+      passenger_name: 'Anonymous Passenger',
       passenger_category: cat,
       passenger_count: count,
       companions: Math.max(0, count - 1),
@@ -1177,6 +1179,8 @@ export async function createManualPassengerJourney({
       destination_name: canonicalDest,
       trip_id: tripId || null,
       route_direction: routeDirection || 'Northbound',
+      qr_token: anonPassId,
+      pass_id: anonPassId,
       status: status || 'boarded'
     };
     const requiredColumns = new Set(['origin_name', 'destination_name', 'status']);

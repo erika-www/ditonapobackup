@@ -5,7 +5,6 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
-import { Camera, X, RefreshCw, CheckCircle2, AlertCircle, Volume2, Sparkles } from 'lucide-react';
 import { createPassengerQrPayload, generateDailyTripId } from '@shared/qrPassUtils';
 
 function playBeep() {
@@ -246,9 +245,8 @@ export function QrCameraScannerModal({
           width: 'min(500px, 100%)',
           backgroundColor: '#0f172a',
           border: '1px solid #334155',
-          borderRadius: '16px',
+          borderRadius: '6px',
           padding: '1.25rem',
-          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)',
           display: 'flex',
           flexDirection: 'column',
           gap: '0.85rem',
@@ -258,7 +256,6 @@ export function QrCameraScannerModal({
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '.5rem' }}>
-            <Camera size={20} color="#06b6d4" />
             <h2 style={{ fontSize: '1.15rem', fontWeight: 800, margin: 0, color: '#f8fafc' }}>
               {title}
             </h2>
@@ -273,11 +270,12 @@ export function QrCameraScannerModal({
               color: '#94a3b8',
               cursor: 'pointer',
               padding: '.25rem',
-              display: 'flex',
-              alignItems: 'center'
+              fontSize: '1.2rem',
+              fontWeight: 'bold',
+              lineHeight: 1
             }}
           >
-            <X size={22} />
+            ×
           </button>
         </div>
 
@@ -288,7 +286,7 @@ export function QrCameraScannerModal({
             width: '100%',
             height: '280px',
             backgroundColor: '#020617',
-            borderRadius: '12px',
+            borderRadius: '4px',
             overflow: 'hidden',
             display: 'flex',
             alignItems: 'center',
@@ -316,8 +314,7 @@ export function QrCameraScannerModal({
                 width: '210px',
                 height: '210px',
                 border: '2px solid rgba(6, 182, 212, 0.85)',
-                borderRadius: '14px',
-                boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.45)',
+                borderRadius: '4px',
                 pointerEvents: 'none',
                 display: 'flex',
                 alignItems: 'center',
@@ -331,8 +328,7 @@ export function QrCameraScannerModal({
                   left: 0,
                   right: 0,
                   height: '2px',
-                  backgroundColor: '#06b6d4',
-                  boxShadow: '0 0 8px #06b6d4'
+                  backgroundColor: '#06b6d4'
                 }}
               />
             </div>
@@ -344,7 +340,7 @@ export function QrCameraScannerModal({
               style={{
                 position: 'absolute',
                 inset: 0,
-                backgroundColor: 'rgba(16, 185, 129, 0.9)',
+                backgroundColor: 'rgba(16, 185, 129, 0.95)',
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
@@ -354,7 +350,7 @@ export function QrCameraScannerModal({
                 zIndex: 10
               }}
             >
-              <CheckCircle2 size={48} />
+              <span style={{ fontSize: '1rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Success</span>
               <strong style={{ fontSize: '1.1rem' }}>{scanSuccessText}</strong>
             </div>
           )}
@@ -375,7 +371,6 @@ export function QrCameraScannerModal({
                 gap: '.5rem'
               }}
             >
-              <AlertCircle size={36} />
               <strong style={{ fontSize: '.95rem' }}>Camera unavailable</strong>
               <span style={{ fontSize: '.8rem', color: '#94a3b8' }}>{cameraError}</span>
               <button
@@ -384,7 +379,7 @@ export function QrCameraScannerModal({
                 className="btn btn-secondary"
                 style={{ marginTop: '.5rem', fontSize: '.8rem', padding: '.4rem .8rem' }}
               >
-                <RefreshCw size={14} /> Retry Camera
+                Retry Camera
               </button>
             </div>
           )}
@@ -400,9 +395,9 @@ export function QrCameraScannerModal({
               type="button"
               onClick={toggleCameraFacing}
               className="btn btn-secondary"
-              style={{ fontSize: '.75rem', padding: '.3rem .6rem', display: 'flex', alignItems: 'center', gap: '.3rem' }}
+              style={{ fontSize: '.75rem', padding: '.3rem .6rem' }}
             >
-              <RefreshCw size={12} /> Flip
+              Flip Camera
             </button>
             <button
               type="button"
@@ -422,11 +417,11 @@ export function QrCameraScannerModal({
           gap: '0.35rem',
           padding: '0.5rem',
           backgroundColor: 'rgba(255, 255, 255, 0.03)',
-          borderRadius: '8px',
+          borderRadius: '4px',
           border: '1px dashed #334155'
         }}>
-          <span style={{ fontSize: '.7rem', color: '#94a3b8', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '.3rem' }}>
-            <Sparkles size={12} color="#38bdf8" /> Quick Test QR Passes (Click to Simulate Scan):
+          <span style={{ fontSize: '.7rem', color: '#94a3b8', fontWeight: 700 }}>
+            Quick Test QR Passes (Click to Simulate Scan):
           </span>
           <div style={{ display: 'flex', gap: '.4rem', flexWrap: 'wrap' }}>
             <button

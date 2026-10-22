@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowLeft, ClipboardCheck, ShieldCheck } from 'lucide-react';
 import { submitOperationsPersonnelRequest } from '../services/supabaseClient';
 
 export function PersonnelRequestPage() {
@@ -22,16 +21,14 @@ export function PersonnelRequestPage() {
 
   return (
     <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', backgroundColor: 'var(--bg-dark)', padding: '1.25rem' }}>
-      <div className="modal-content" style={{ width: '100%', maxWidth: '520px', padding: '2rem' }}>
+      <div className="modal-content" style={{ width: '100%', maxWidth: '520px', padding: '2rem', borderRadius: '6px' }}>
         <div style={{ textAlign: 'center', marginBottom: '1.35rem' }}>
-          <ShieldCheck size={42} color="#06b6d4" style={{ margin: '0 auto .5rem' }} />
           <h1 style={{ fontSize: '1.55rem', margin: 0 }}>Personnel Registration Request</h1>
           <p style={{ color: '#94a3b8', marginBottom: 0 }}>An administrator will verify your details before adding you to the bus duty register.</p>
         </div>
 
         {submitted ? (
-          <div role="status" className="alert alert-success" style={{ padding: '1rem', lineHeight: 1.55 }}>
-            <ClipboardCheck size={18} style={{ verticalAlign: 'middle', marginRight: '.4rem' }} />
+          <div role="status" className="alert alert-success" style={{ padding: '1rem', lineHeight: 1.55, borderRadius: '4px' }}>
             Your request was submitted for review. It will become available in the duty registration form after an administrator approves it.
           </div>
         ) : (
@@ -51,12 +48,12 @@ export function PersonnelRequestPage() {
               <label className="form-label" htmlFor="request-id">Personnel ID</label>
               <input id="request-id" className="form-input" maxLength={80} placeholder="e.g. DRV-1024" value={personnelId} onChange={(event) => setPersonnelId(event.target.value)} required />
             </div>
-            <button className="btn btn-primary" type="submit" disabled={busy} style={{ justifyContent: 'center', padding: '.8rem', fontWeight: 700 }}>{busy ? 'Submitting…' : 'Submit for approval'}</button>
+            <button className="btn btn-primary" type="submit" disabled={busy} style={{ justifyContent: 'center', padding: '.8rem', fontWeight: 700 }}>{busy ? 'Submitting...' : 'Submit for approval'}</button>
           </form>
         )}
 
         <div style={{ textAlign: 'center', marginTop: '1.1rem' }}>
-          <Link to="/login" style={{ color: '#06b6d4', fontWeight: 700, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '.35rem' }}><ArrowLeft size={15} /> Back to duty registration</Link>
+          <Link to="/login" style={{ color: '#06b6d4', fontWeight: 700, textDecoration: 'none' }}>&lt;- Back to duty registration</Link>
         </div>
       </div>
     </div>

@@ -1,10 +1,5 @@
-/**
- * BusesAdminPage Component (React / JSX)
- * Administrative portal for fleet vehicle inventory management.
- */
 import React, { useEffect, useState } from 'react';
 import { getAdminBuses, createBus, deleteBus } from '../services/api';
-import { Plus, Trash2, X } from 'lucide-react';
 
 export function BusesAdminPage() {
   const [buses, setBuses] = useState([]);
@@ -65,7 +60,7 @@ export function BusesAdminPage() {
         </div>
 
         <button type="button" onClick={() => setShowModal(true)} className="btn btn-primary">
-          <Plus size={16} /> Add Bus Unit
+          Add Bus Unit
         </button>
       </div>
 
@@ -104,7 +99,7 @@ export function BusesAdminPage() {
                   </td>
                   <td style={{ textAlign: 'right' }}>
                     <button type="button" onClick={() => handleDelete(b.id, b.bus_code)} className="btn btn-danger" style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}>
-                      <Trash2 size={14} /> Delete
+                      Delete
                     </button>
                   </td>
                 </tr>
@@ -116,10 +111,10 @@ export function BusesAdminPage() {
 
       {showModal && (
         <div className="modal-overlay">
-          <div className="modal-content">
+          <div className="modal-content" style={{ borderRadius: '6px' }}>
             <div className="modal-header">
               <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Add Fleet Unit</h2>
-              <button type="button" onClick={() => setShowModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><X size={20} color="#94a3b8" /></button>
+              <button type="button" onClick={() => setShowModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontWeight: 'bold' }}>×</button>
             </div>
 
             <form onSubmit={handleCreate}>

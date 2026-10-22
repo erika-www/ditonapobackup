@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { MapPin, Plus, X } from 'lucide-react';
 import { addConfiguredRoute4Stop, fetchConfiguredRoute4Stops } from '../services/supabaseClient';
 import { applyRoute4CoordinateOverrides, saveRoute4CoordinateOverride } from '@shared/route4Stops';
 
@@ -74,23 +73,23 @@ export function StopsAdminPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-      <header className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+      <header className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap', borderRadius: '6px' }}>
         <div>
-          <h1 style={{ fontSize: '1.7rem', margin: 0, display: 'flex', alignItems: 'center', gap: '.5rem' }}><MapPin color="#34d399" /> Route Stop List & Location Coordinates Configuration</h1>
+          <h1 style={{ fontSize: '1.7rem', margin: 0 }}>Route Stop List & Location Coordinates Configuration</h1>
           <p style={{ color: '#94a3b8', margin: '.45rem 0 0' }}>These Route 4 stops are shared with the driver route view and passenger boarding and destination choices.</p>
         </div>
-        <button type="button" onClick={openAdd} className="btn btn-primary"><Plus size={16} /> Add New Route Stop</button>
+        <button type="button" onClick={openAdd} className="btn btn-primary">Add New Route Stop</button>
       </header>
 
       {error && <div className="alert alert-danger" role="alert">{error}</div>}
       {notice && <div className="alert alert-success" role="status">{notice}</div>}
 
-      <section className="card">
+      <section className="card" style={{ borderRadius: '6px' }}>
         <div className="table-container" style={{ marginBottom: 0 }}>
           <table className="data-table">
             <thead><tr><th>Stop Sequence</th><th>Stop Name</th><th>Northbound GPS (lat, lng)</th><th>Southbound GPS (lat, lng)</th><th>Actions</th></tr></thead>
             <tbody>
-              {loading && <tr><td colSpan="5" style={{ textAlign: 'center', color: '#94a3b8' }}>Loading Route 4 stops…</td></tr>}
+              {loading && <tr><td colSpan="5" style={{ textAlign: 'center', color: '#94a3b8' }}>Loading Route 4 stops...</td></tr>}
               {!loading && stops.map((stop, index) => <tr key={stop.dbId}>
                 <td><strong>{stop.code || `STOP-${String(index + 1).padStart(2, '0')}`}</strong></td>
                 <td>{stop.name}</td>
@@ -105,10 +104,10 @@ export function StopsAdminPage() {
       </section>
 
       {showAddForm && <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, display: 'grid', placeItems: 'center', zIndex: 2000, padding: '1rem', background: 'rgba(0,0,0,.8)' }}>
-        <form className="modal-content card" onSubmit={handleSubmit} style={{ width: 'min(500px, 100%)', padding: '1.5rem' }}>
+        <form className="modal-content card" onSubmit={handleSubmit} style={{ width: 'min(500px, 100%)', padding: '1.5rem', borderRadius: '6px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
             <h2 style={{ margin: 0, fontSize: '1.2rem' }}>{editingStop ? 'Edit Route Stop' : 'Add New Route Stop'}</h2>
-            <button type="button" aria-label="Close" onClick={() => setShowAddForm(false)} className="btn btn-secondary" style={{ padding: '.35rem' }}><X size={18} /></button>
+            <button type="button" aria-label="Close" onClick={() => setShowAddForm(false)} className="btn btn-secondary" style={{ padding: '.25rem .5rem', fontWeight: 'bold' }}>×</button>
           </div>
           {error && <div className="alert alert-danger" role="alert">{error}</div>}
           <label className="form-label" htmlFor="route-stop-name">Stop Name</label>
@@ -120,7 +119,7 @@ export function StopsAdminPage() {
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '.6rem', marginTop: '1.25rem' }}>
             <button type="button" className="btn btn-secondary" onClick={() => setShowAddForm(false)}>Cancel</button>
-            <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving…' : editingStop ? 'Save Changes' : 'Add Route Stop'}</button>
+            <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving...' : editingStop ? 'Save Changes' : 'Add Route Stop'}</button>
           </div>
         </form>
       </div>}

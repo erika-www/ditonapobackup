@@ -1,11 +1,6 @@
-/**
- * RoutesAdminPage Component (React / JSX)
- * Administrative CRUD table for managing QC Bus routes.
- */
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getAdminRoutes, createRoute, updateRoute, deleteRoute } from '../services/api';
-import { Plus, Search, Edit2, Trash2, ListOrdered, X } from 'lucide-react';
 
 export function RoutesAdminPage() {
   const [routes, setRoutes] = useState([]);
@@ -93,28 +88,26 @@ export function RoutesAdminPage() {
         </div>
 
         <button type="button" onClick={openCreateModal} className="btn btn-primary">
-          <Plus size={16} /> Create New Route
+          Create New Route
         </button>
       </div>
 
       {notification && (
         <div className={`alert alert-${notification.type}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>{notification.text}</span>
-          <button type="button" onClick={() => setNotification(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer' }}><X size={16} /></button>
+          <button type="button" onClick={() => setNotification(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontWeight: 'bold' }}>×</button>
         </div>
       )}
 
       {/* Search Filter */}
-      <div style={{ marginBottom: '1.25rem', maxWidth: '400px', position: 'relative' }}>
+      <div style={{ marginBottom: '1.25rem', maxWidth: '400px' }}>
         <input
           type="text"
           className="form-input"
-          style={{ paddingLeft: '2.5rem' }}
           placeholder="Search by code or route name..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <Search size={16} color="#64748b" style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)' }} />
       </div>
 
       {/* Routes Table */}
@@ -156,13 +149,13 @@ export function RoutesAdminPage() {
                   <td style={{ textAlign: 'right' }}>
                     <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'flex-end' }}>
                       <Link to={`/routes/${r.id}/sequence`} className="btn btn-secondary" style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }} title="Manage Stop Sequence">
-                        <ListOrdered size={14} /> Sequence
+                        Sequence
                       </Link>
                       <button type="button" onClick={() => openEditModal(r)} className="btn btn-secondary" style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}>
-                        <Edit2 size={14} /> Edit
+                        Edit
                       </button>
                       <button type="button" onClick={() => handleDelete(r.id, r.route_code)} className="btn btn-danger" style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}>
-                        <Trash2 size={14} /> Delete
+                        Delete
                       </button>
                     </div>
                   </td>
@@ -176,12 +169,12 @@ export function RoutesAdminPage() {
       {/* Modal Form */}
       {showModal && (
         <div className="modal-overlay">
-          <div className="modal-content">
+          <div className="modal-content" style={{ borderRadius: '6px' }}>
             <div className="modal-header">
               <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>
                 {editRouteId ? 'Edit Route' : 'Create New Route'}
               </h2>
-              <button type="button" onClick={() => setShowModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><X size={20} color="#94a3b8" /></button>
+              <button type="button" onClick={() => setShowModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontWeight: 'bold' }}>×</button>
             </div>
 
             <form onSubmit={handleFormSubmit}>

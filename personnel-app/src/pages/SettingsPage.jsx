@@ -1,17 +1,21 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { MessageSquare, Palette, Star, User } from 'lucide-react';
 import { fetchPassengerFeedback } from '../services/supabaseClient';
 import { StopsAdminPage } from './StopsAdminPage';
 
 export function SettingsPage() {
   const { dutySession } = useAuth();
-  const [theme, setTheme] = useState(() => localStorage.getItem('qcbus_admin_theme') || 'dark');
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('qcbus_admin_theme');
+    if (saved === 'light' || saved === 'dark' || saved === 'dim') return saved;
+    return 'dark';
+  });
   const [feedbacks, setFeedbacks] = useState([]);
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('qcbus_admin_theme', theme);
+    const activeTheme = (theme === 'light' || theme === 'dark' || theme === 'dim') ? theme : 'dark';
+    document.documentElement.setAttribute('data-theme', activeTheme);
+    localStorage.setItem('qcbus_admin_theme', activeTheme);
   }, [theme]);
 
   useEffect(() => {
@@ -26,20 +30,20 @@ export function SettingsPage() {
   }, []);
 
   const detailStyle = { color: 'var(--text-main)', fontWeight: 600, margin: '.3rem 0 0' };
-  const labelStyle = { color: '#94a3b8', fontSize: '.82rem', margin: 0 };
+  const labelStyle = { color: 'var(--text-muted)', fontSize: '.82rem', margin: 0 };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
       <header className="card">
         <h1 style={{ fontSize: '1.6rem', margin: '0 0 .25rem' }}>Duty Settings</h1>
-        <p style={{ color: '#94a3b8', fontSize: '.88rem', margin: 0 }}>View the active duty details and choose a display theme.</p>
+        <p style={{ color: 'var(--text-muted)', fontSize: '.88rem', margin: 0 }}>View the active duty details and choose a display theme.</p>
       </header>
 
       <StopsAdminPage />
 
       <section className="card">
-        <h2 style={{ fontSize: '1.15rem', margin: '0 0 1rem', color: '#06b6d4', display: 'flex', alignItems: 'center', gap: '.4rem' }}>
-          <User size={20} /> Personnel On Duty & Bus Details
+        <h2 style={{ fontSize: '1.15rem', margin: '0 0 1rem', color: 'var(--color-accent)' }}>
+          Personnel On Duty & Bus Details
         </h2>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
           {[
@@ -51,7 +55,7 @@ export function SettingsPage() {
             ['Bus Capacity', dutySession.busCapacity],
             ['Trip Direction', dutySession.tripDirection]
           ].map(([label, value]) => (
-            <div key={label} style={{ padding: '.8rem', border: '1px solid var(--border-color)', borderRadius: '8px', background: 'var(--bg-subtle)' }}>
+            <div key={label} style={{ padding: '.8rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', background: 'var(--bg-subtle)' }}>
               <p style={labelStyle}>{label}</p>
               <p style={detailStyle}>{value || '—'}</p>
             </div>
@@ -60,40 +64,62 @@ export function SettingsPage() {
       </section>
 
       <section className="card">
-        <h2 style={{ fontSize: '1.15rem', margin: '0 0 1rem', color: '#06b6d4', display: 'flex', alignItems: 'center', gap: '.4rem' }}>
-          <Palette size={20} /> Theme Settings
+        <h2 style={{ fontSize: '1.15rem', margin: '0 0 1rem', color: 'var(--color-accent)' }}>
+          Theme Settings
         </h2>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
           {[
-            { id: 'dark', label: 'Dark Transit', desc: 'Sleek dark mode interface' },
-            { id: 'light', label: 'Light Clean', desc: 'Bright, high-clarity background' },
-            { id: 'emerald', label: 'Emerald Bus', desc: 'QC green transit theme' },
-            { id: 'contrast', label: 'High Contrast', desc: 'Maximum contrast visibility' }
+            { id: 'light', label: 'Light', desc: 'Clean, high-clarity background' },
+            { id: 'dark', label: 'Dark', desc: 'Default dark interface' },
+            { id: 'dim', label: 'Dim', desc: 'Subdued dim contrast' }
           ].map((option) => (
-            <button key={option.id} type="button" onClick={() => setTheme(option.id)} aria-pressed={theme === option.id} style={{ textAlign: 'left', padding: '1rem', borderRadius: '8px', border: theme === option.id ? '2px solid #06b6d4' : '1px solid var(--border-color)', background: theme === option.id ? 'rgba(6,182,212,.15)' : 'var(--bg-subtle)', cursor: 'pointer' }}>
-              <div style={{ fontWeight: 700, color: theme === option.id ? '#38bdf8' : 'var(--text-main)', marginBottom: '.25rem' }}>{option.label}</div>
-              <div style={{ fontSize: '.8rem', color: '#94a3b8' }}>{option.desc}</div>
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => setTheme(option.id)}
+              aria-pressed={theme === option.id}
+              style={{
+                textAlign: 'left',
+                padding: '1rem',
+                borderRadius: 'var(--radius-sm)',
+                border: theme === option.id ? '2px solid var(--color-accent)' : '1px solid var(--border-color)',
+                background: theme === option.id ? 'var(--bg-subtle)' : 'var(--bg-card)',
+                cursor: 'pointer'
+              }}
+            >
+              <div style={{ fontWeight: 700, color: theme === option.id ? 'var(--color-accent)' : 'var(--text-main)', marginBottom: '.25rem' }}>
+                {option.label}
+              </div>
+              <div style={{ fontSize: '.8rem', color: 'var(--text-muted)' }}>{option.desc}</div>
             </button>
           ))}
         </div>
       </section>
 
       <section className="card">
-        <h2 style={{ fontSize: '1.15rem', margin: '0 0 1rem', color: '#eab308', display: 'flex', alignItems: 'center', gap: '.4rem' }}>
-          <MessageSquare size={20} /> Passenger App Feedbacks & Ratings
+        <h2 style={{ fontSize: '1.15rem', margin: '0 0 1rem', color: 'var(--color-warning)' }}>
+          Passenger App Feedbacks & Ratings
         </h2>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '.85rem' }}>
-          {feedbacks.length === 0 ? <p style={{ color: '#94a3b8', margin: 0 }}>No passenger feedback has been received yet.</p> : feedbacks.map((feedback) => (
-            <article key={feedback.id} style={{ padding: '1rem', borderRadius: '8px', background: 'rgba(15,23,42,.5)', border: '1px solid var(--border-color)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '.75rem', marginBottom: '.4rem' }}>
-                <span className="badge badge-warning" style={{ display: 'inline-flex', alignItems: 'center', gap: '.35rem' }}>
-                  {feedback.passenger_name || 'Passenger'} ({feedback.feedback_rating}/5 <Star size={12} fill="#fbbf24" color="#fbbf24" />)
-                </span>
-                <span style={{ fontSize: '.78rem', color: '#94a3b8' }}>{feedback.updated_at ? new Date(feedback.updated_at).toLocaleDateString() : ''}</span>
-              </div>
-              <p style={{ fontSize: '.9rem', color: '#cbd5e1', margin: 0, lineHeight: 1.4 }}>{feedback.feedback_text || 'No written comment.'}</p>
-            </article>
-          ))}
+          {feedbacks.length === 0 ? (
+            <p style={{ color: 'var(--text-muted)', margin: 0 }}>No passenger feedback has been received yet.</p>
+          ) : (
+            feedbacks.map((feedback) => (
+              <article key={feedback.id} style={{ padding: '1rem', borderRadius: 'var(--radius-sm)', background: 'var(--bg-subtle)', border: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '.75rem', marginBottom: '.4rem' }}>
+                  <span className="badge badge-warning">
+                    {feedback.passenger_name || 'Passenger'} ({feedback.feedback_rating}/5 Rating)
+                  </span>
+                  <span style={{ fontSize: '.78rem', color: 'var(--text-muted)' }}>
+                    {feedback.updated_at ? new Date(feedback.updated_at).toLocaleDateString() : ''}
+                  </span>
+                </div>
+                <p style={{ fontSize: '.9rem', color: 'var(--text-main)', margin: 0, lineHeight: 1.4 }}>
+                  {feedback.feedback_text || 'No written comment.'}
+                </p>
+              </article>
+            ))
+          )}
         </div>
       </section>
     </div>

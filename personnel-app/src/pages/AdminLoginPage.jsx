@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ArrowLeft, LockKeyhole, Mail, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { loginAdmin, signUpAdminRequest } from '../services/supabaseClient';
 
@@ -56,7 +55,7 @@ export function AdminLoginPage() {
   };
 
   const tabStyle = (selected) => ({
-    flex: 1, padding: '.65rem', borderRadius: '8px', cursor: 'pointer',
+    flex: 1, padding: '.65rem', borderRadius: '4px', cursor: 'pointer',
     border: `1px solid ${selected ? '#06b6d4' : 'var(--border-color)'}`,
     background: selected ? 'rgba(6,182,212,.14)' : 'transparent',
     color: selected ? '#22d3ee' : '#94a3b8', fontWeight: 700
@@ -64,17 +63,16 @@ export function AdminLoginPage() {
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'var(--bg-dark)', padding: '1.5rem' }}>
-      <div className="modal-content" style={{ maxWidth: '480px', padding: '2.25rem', width: '100%' }}>
+      <div className="modal-content" style={{ maxWidth: '480px', padding: '2.25rem', width: '100%', borderRadius: '6px' }}>
         <div style={{ textAlign: 'center', marginBottom: '1.35rem' }}>
-          <ShieldCheck size={44} color="#06b6d4" style={{ margin: '0 auto .5rem' }} />
           <h1 style={{ fontSize: '1.65rem', fontWeight: 800, marginBottom: '.25rem' }}>Administrator Access</h1>
           <p style={{ color: '#94a3b8', fontSize: '.88rem', margin: 0 }}>QC Bus Operations Portal</p>
         </div>
 
         {isAuthenticated && (
-          <div style={{ background: 'rgba(6, 182, 212, 0.1)', border: '1px solid rgba(6, 182, 212, 0.3)', borderRadius: '10px', padding: '1rem', marginBottom: '1.25rem', textAlign: 'center' }}>
+          <div style={{ background: 'rgba(6, 182, 212, 0.1)', border: '1px solid rgba(6, 182, 212, 0.3)', borderRadius: '4px', padding: '1rem', marginBottom: '1.25rem', textAlign: 'center' }}>
             <div style={{ color: '#22d3ee', fontWeight: 700, fontSize: '.95rem', marginBottom: '.35rem' }}>
-              ✓ Administrator Session Authorized
+              Administrator Session Authorized
             </div>
             <p style={{ color: '#94a3b8', fontSize: '.82rem', marginBottom: '.85rem' }}>
               Logged in as <strong style={{ color: '#f8fafc' }}>{user?.username || 'Administrator'}</strong>. You can proceed directly to the Admin Exclusive portal or return to the bus duty terminal.
@@ -86,7 +84,7 @@ export function AdminLoginPage() {
                 className="btn btn-primary"
                 style={{ padding: '.55rem 1rem', fontSize: '.88rem', fontWeight: 700 }}
               >
-                Enter Admin Portal →
+                Enter Admin Portal -&gt;
               </button>
               <button
                 type="button"
@@ -114,11 +112,11 @@ export function AdminLoginPage() {
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '.85rem' }}>
           {tab === 'signup' && <div className="form-group"><label className="form-label">Full Name</label><input className="form-input" autoComplete="name" value={fullName} onChange={(event) => setFullName(event.target.value)} required /></div>}
           <div className="form-group">
-            <label className="form-label"><Mail size={14} style={{ verticalAlign: 'middle', marginRight: '.3rem' }} />Email</label>
+            <label className="form-label">Email</label>
             <input type="email" className="form-input" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
           </div>
           <div className="form-group">
-            <label className="form-label"><LockKeyhole size={14} style={{ verticalAlign: 'middle', marginRight: '.3rem' }} />Password</label>
+            <label className="form-label">Password</label>
             <input type="password" className="form-input" autoComplete={tab === 'login' ? 'current-password' : 'new-password'} minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} required />
           </div>
           {tab === 'signup' && <div className="form-group"><label className="form-label">Confirm Password</label><input type="password" className="form-input" autoComplete="new-password" minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></div>}
@@ -129,8 +127,8 @@ export function AdminLoginPage() {
         </form>
 
         <div style={{ textAlign: 'center', marginTop: '1.25rem' }}>
-          <Link to="/login" style={{ color: '#06b6d4', fontWeight: 700, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '.35rem' }}>
-            <ArrowLeft size={15} /> Back to bus duty login
+          <Link to="/login" style={{ color: '#06b6d4', fontWeight: 700, textDecoration: 'none' }}>
+            &lt;- Back to bus duty login
           </Link>
         </div>
       </div>

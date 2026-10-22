@@ -1,9 +1,7 @@
-/** Duty check-in and administrator access for the QC Bus Admin portal. */
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { fetchOperationsPersonnel } from '../services/supabaseClient';
-import { ShieldCheck, User } from 'lucide-react';
 
 export function LoginPage() {
   const [personnel, setPersonnel] = useState([]);
@@ -93,7 +91,6 @@ export function LoginPage() {
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'var(--bg-dark)', padding: '1.5rem' }}>
       <div className="modal-content" style={{ maxWidth: '560px', padding: '2.25rem', width: '100%' }}>
         <div style={{ textAlign: 'center', marginBottom: '1.25rem' }}>
-          <ShieldCheck size={44} color="#06b6d4" style={{ margin: '0 auto 0.5rem' }} />
           <h1 style={{ fontSize: '1.75rem', fontWeight: 800 }}>DITO NA PO</h1>
           <p style={{ color: '#94a3b8', fontSize: '0.88rem' }}>QC Bus Operations & Duty Personnel Portal</p>
         </div>
@@ -109,18 +106,18 @@ export function LoginPage() {
             </Link> to unlock immediate personnel check-in.
           </div>
         ) : (
-          <div style={{ background: 'rgba(6, 182, 212, 0.1)', border: '1px solid rgba(6, 182, 212, 0.3)', borderRadius: '8px', padding: '.65rem 1rem', marginBottom: '1.25rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '.5rem', color: '#67e8f9', fontSize: '.85rem', flexWrap: 'wrap' }}>
-            <span>{isTestMode ? 'Local GPS test mode is active. Database writes still require Supabase authentication.' : '✓ Admin session authorized. Personnel can proceed to duty check-in.'}</span>
+          <div style={{ background: 'rgba(6, 182, 212, 0.1)', border: '1px solid rgba(6, 182, 212, 0.3)', borderRadius: '4px', padding: '.65rem 1rem', marginBottom: '1.25rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '.5rem', color: '#67e8f9', fontSize: '.85rem', flexWrap: 'wrap' }}>
+            <span>{isTestMode ? 'Local GPS test mode is active. Database writes still require Supabase authentication.' : 'Admin session authorized. Personnel can proceed to duty check-in.'}</span>
             <Link to="/admin" style={{ color: '#38bdf8', fontWeight: 700, textDecoration: 'underline', whiteSpace: 'nowrap' }}>
-              Go to Admin Portal →
+              Go to Admin Portal -&gt;
             </Link>
           </div>
         )}
 
         <form onSubmit={handleDutySubmit}>
-          <div style={{ backgroundColor: 'rgba(15, 23, 42, 0.6)', padding: '1.25rem', borderRadius: '10px', border: '1px solid var(--border-color)', marginBottom: '1.25rem' }}>
-            <h3 style={{ fontSize: '1rem', marginBottom: '.85rem', color: '#06b6d4', display: 'flex', alignItems: 'center', gap: '.4rem' }}>
-              <User size={18} /> Bus Personnel & Vehicle Details
+          <div style={{ backgroundColor: 'rgba(15, 23, 42, 0.6)', padding: '1.25rem', borderRadius: '4px', border: '1px solid var(--border-color)', marginBottom: '1.25rem' }}>
+            <h3 style={{ fontSize: '1rem', marginBottom: '.85rem', color: '#06b6d4' }}>
+              Bus Personnel & Vehicle Details
             </h3>
             
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '.85rem' }}>

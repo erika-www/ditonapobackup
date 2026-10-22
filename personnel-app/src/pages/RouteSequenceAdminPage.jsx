@@ -1,11 +1,6 @@
-/**
- * RouteSequenceAdminPage Component (React / JSX)
- * Administrative portal page for reordering stop sequences up/down and updating ETAs.
- */
 import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getAdminRoutes, getRouteStops, getAdminStops, addStopToRoute, reorderRouteStops, removeStopFromRoute } from '../services/api';
-import { ArrowLeft, ArrowUp, ArrowDown, Plus, Trash2, Save } from 'lucide-react';
 
 export function RouteSequenceAdminPage() {
   const { id } = useParams();
@@ -113,7 +108,7 @@ export function RouteSequenceAdminPage() {
   return (
     <div>
       <Link to="/routes" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', color: '#94a3b8', fontSize: '0.9rem', marginBottom: '1.25rem' }}>
-        <ArrowLeft size={16} /> Back to Routes
+        &lt;- Back to Routes
       </Link>
 
       <div className="admin-header">
@@ -127,18 +122,18 @@ export function RouteSequenceAdminPage() {
         </div>
 
         <button type="button" onClick={handleSaveSequence} className="btn btn-primary" disabled={saving}>
-          <Save size={16} /> {saving ? 'Saving...' : 'Save Sequence Order'}
+          {saving ? 'Saving...' : 'Save Sequence Order'}
         </button>
       </div>
 
       {notification && (
-        <div className="alert alert-success" style={{ marginBottom: '1.5rem' }}>
+        <div className="alert alert-success" style={{ marginBottom: '1.5rem', borderRadius: '4px' }}>
           {notification}
         </div>
       )}
 
       {/* Add Stop Control Panel */}
-      <div className="stat-card" style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+      <div className="stat-card" style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem', alignItems: 'flex-end', flexWrap: 'wrap', borderRadius: '6px' }}>
         <div style={{ flex: 1, minWidth: '240px' }}>
           <label className="form-label">Add Stop to Sequence</label>
           <select
@@ -167,7 +162,7 @@ export function RouteSequenceAdminPage() {
         </div>
 
         <button type="button" onClick={handleAddStop} className="btn btn-secondary" disabled={!selectedStopId}>
-          <Plus size={16} /> Add to Sequence
+          Add to Sequence
         </button>
       </div>
 
@@ -190,7 +185,7 @@ export function RouteSequenceAdminPage() {
               routeStops.map((item, idx) => (
                 <tr key={item.id}>
                   <td>
-                    <span style={{ background: '#06b6d4', color: '#ffffff', fontWeight: 800, width: '28px', height: '28px', borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem' }}>
+                    <span style={{ background: '#06b6d4', color: '#ffffff', fontWeight: 800, width: '28px', height: '28px', borderRadius: '4px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem' }}>
                       {idx + 1}
                     </span>
                   </td>
@@ -209,29 +204,29 @@ export function RouteSequenceAdminPage() {
                         onClick={() => handleMove(idx, 'up')}
                         disabled={idx === 0}
                         className="btn btn-secondary"
-                        style={{ padding: '0.3rem 0.5rem', opacity: idx === 0 ? 0.4 : 1 }}
+                        style={{ padding: '0.3rem 0.5rem', opacity: idx === 0 ? 0.4 : 1, fontSize: '0.8rem' }}
                         title="Move Up"
                       >
-                        <ArrowUp size={14} />
+                        Up
                       </button>
                       <button
                         type="button"
                         onClick={() => handleMove(idx, 'down')}
                         disabled={idx === routeStops.length - 1}
                         className="btn btn-secondary"
-                        style={{ padding: '0.3rem 0.5rem', opacity: idx === routeStops.length - 1 ? 0.4 : 1 }}
+                        style={{ padding: '0.3rem 0.5rem', opacity: idx === routeStops.length - 1 ? 0.4 : 1, fontSize: '0.8rem' }}
                         title="Move Down"
                       >
-                        <ArrowDown size={14} />
+                        Down
                       </button>
                       <button
                         type="button"
                         onClick={() => handleRemoveStop(item.stop_id)}
                         className="btn btn-danger"
-                        style={{ padding: '0.3rem 0.5rem' }}
+                        style={{ padding: '0.3rem 0.5rem', fontSize: '0.8rem' }}
                         title="Remove from Route"
                       >
-                        <Trash2 size={14} />
+                        Remove
                       </button>
                     </div>
                   </td>

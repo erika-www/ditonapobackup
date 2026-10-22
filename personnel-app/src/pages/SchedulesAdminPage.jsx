@@ -1,10 +1,5 @@
-/**
- * SchedulesAdminPage Component (React / JSX)
- * Administrative portal for managing route departure schedules.
- */
 import React, { useEffect, useState } from 'react';
 import { getAdminSchedules, getAdminRoutes, createSchedule, deleteSchedule } from '../services/api';
-import { Plus, Trash2, X } from 'lucide-react';
 
 export function SchedulesAdminPage() {
   const [schedules, setSchedules] = useState([]);
@@ -72,7 +67,7 @@ export function SchedulesAdminPage() {
         </div>
 
         <button type="button" onClick={() => setShowModal(true)} className="btn btn-primary">
-          <Plus size={16} /> Add Schedule
+          Add Schedule
         </button>
       </div>
 
@@ -109,7 +104,7 @@ export function SchedulesAdminPage() {
                     <td style={{ color: '#94a3b8' }}>{s.arrival_time || '-'}</td>
                     <td style={{ textAlign: 'right' }}>
                       <button type="button" onClick={() => handleDelete(s.id)} className="btn btn-danger" style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}>
-                        <Trash2 size={14} /> Delete
+                        Delete
                       </button>
                     </td>
                   </tr>
@@ -122,10 +117,10 @@ export function SchedulesAdminPage() {
 
       {showModal && (
         <div className="modal-overlay">
-          <div className="modal-content">
+          <div className="modal-content" style={{ borderRadius: '6px' }}>
             <div className="modal-header">
               <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Add Route Schedule</h2>
-              <button type="button" onClick={() => setShowModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><X size={20} color="#94a3b8" /></button>
+              <button type="button" onClick={() => setShowModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontWeight: 'bold' }}>×</button>
             </div>
 
             <form onSubmit={handleCreate}>

@@ -88,3 +88,47 @@ export function generatePDFSummaryReport({ timeframe = 'Day', dutySession = {}, 
 </html>`);
   reportWindow.document.close();
 }
+
+/** Automatically download a CSV of the trip summary directly to disk */
+export function downloadTripSummaryCSV({ timeframe = 'Day', dutySession = {}, summary = {} }) {
+  if (typeof window === 'undefined' || !window.document) return;
+  const rawDate = summary.serviceDate || dutySession.serviceDate || new Date().toISOString().slice(0, 10);
+  const rows = Array.isArray(summary.stops) ? summary.stops : [];
+  const totals = summary.totals || {};
+  const driverName = summary.driverName || dutySession.driverName || 'Not assigned';
+  const conductorName = summary.conductorName || dutySession.conductorName || 'Not assigned';
+  const dispatcherName = summary.dispatcherName || dutySession.dispatcherName || 'Not assigned';
+  const plateNumber = summary.plateNumber || dutySession.plateNumber || 'Not assigned';
+
+  const formatTime = (value) => {
+    if (!value) return '-';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? '-'
+      : date.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  let csv = `TRIP SUMMARY REPORT (${timeframe.toUpperCase()})\r\n`;
+  csv += `Date,${rawDate}\r\n`;
+  csv += `Driver,"${driverName}"\r\n`;
+  csv += `Conductor,"${conductorName}"\r\n`;
+  csv += `Dispatcher,"${dispatcherName}"\r\n`;
+  csv += `Plate Number,"${plateNumber}"\r\n\r\n`;
+  csv += `Stop Name,Time,Boarded Passengers,Alighted Passengers,Total Passengers\r\n`;
+
+  rows.forEach((row) => {
+    csv += `"${row.stopName || ''}","${formatTime(row.lastEventAt)}",${Number(row.boarded) || 0},${Number(row.alighted) || 0},${Number(row.total) || 0}\r\n`;
+  });
+
+  csv += `Total,-,${Number(totals.passengersBoarded) || 0},${Number(totals.passengersAlighted) || 0},${rows.length ? Number(rows[rows.length - 1]?.total) || 0 : 0}\r\n`;
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `Trip_Summary_${plateNumber.replace(/\s+/g, '_')}_${rawDate}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}

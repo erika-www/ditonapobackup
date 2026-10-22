@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { CheckCircle, RefreshCw, Users, ShieldCheck, UserCheck, AlertCircle, MapPin, ChevronDown, ChevronUp, Camera } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import {
   supabase,
@@ -51,6 +50,32 @@ export function PassengerCheckInPage() {
       if (result.success && result.data?.id) setTripId(result.data.id);
     });
     return () => { cancelled = true; };
+  }, [dutySession?.plateNumber]);
+
+  // Listen to registry sync events from Route Information and other tabs
+  useEffect(() => {
+    const handleSync = () => {
+      try {
+        const plate = dutySession?.plateNumber || 'QC-BUS';
+        const saved = localStorage.getItem(`qcbus_registry_${plate}`);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            setRegistry(parsed);
+          }
+        }
+      } catch (_) {}
+      refresh();
+    };
+
+    window.addEventListener('qcbus_registry_sync', handleSync);
+    window.addEventListener('storage', handleSync);
+    window.addEventListener('focus', handleSync);
+    return () => {
+      window.removeEventListener('qcbus_registry_sync', handleSync);
+      window.removeEventListener('storage', handleSync);
+      window.removeEventListener('focus', handleSync);
+    };
   }, [dutySession?.plateNumber]);
 
   const refresh = useCallback(async () => {
@@ -214,7 +239,7 @@ export function PassengerCheckInPage() {
       if (effectiveTripId) setTripId(effectiveTripId);
     }
     if (!effectiveTripId) {
-      setError('🔒 Trip not started. Please start the trip first.');
+      setError('Trip not started. Please start the trip first.');
       setBusyId(null);
       dismissSoftKeyboard();
       return;
@@ -264,6 +289,7 @@ export function PassengerCheckInPage() {
         try {
           const plate = dutySession?.plateNumber || 'QC-BUS';
           localStorage.setItem(`qcbus_registry_${plate}`, JSON.stringify(nextRows));
+          window.dispatchEvent(new CustomEvent('qcbus_registry_sync', { detail: { plate } }));
           localStorage.setItem(`qcbus_scanned_${token}`, JSON.stringify({ status: updatedJourney.status, scanned_at: now }));
           if (journey.id) {
             localStorage.setItem(`qcbus_scanned_${journey.id}`, JSON.stringify({ status: updatedJourney.status, scanned_at: now }));
@@ -329,12 +355,12 @@ export function PassengerCheckInPage() {
         const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - passengerCount) : availableRegularSeats;
         const newTotal = totalOnboard + passengerCount;
         setNotice(
-          `✓ ${passengerCount} PASSENGER${passengerCount === 1 ? '' : 'S'} BOARDED (${catName}). Total Onboard: ${newTotal}/50. Remaining Seats: ${remainingPriority} Priority / ${remainingRegular} Regular. Boarded at: ${resolvedOrigin.name} → Destination: ${resolvedDestination.name}.`
+          `${passengerCount} PASSENGER${passengerCount === 1 ? '' : 'S'} BOARDED (${catName}). Total Onboard: ${newTotal}/50. Remaining Seats: ${remainingPriority} Priority / ${remainingRegular} Regular. Boarded at: ${resolvedOrigin.name} -> Destination: ${resolvedDestination.name}.`
         );
       } else {
         const newTotal = Math.max(0, totalOnboard - passengerCount);
         setNotice(
-          `✓ ${passengerCount} PASSENGER${passengerCount === 1 ? '' : 'S'} ALIGHTED at ${resolvedDestination.name}. ${passengerCount} seat${passengerCount === 1 ? '' : 's'} freed. Total Onboard: ${newTotal}/50.`
+          `${passengerCount} PASSENGER${passengerCount === 1 ? '' : 'S'} ALIGHTED at ${resolvedDestination.name}. ${passengerCount} seat${passengerCount === 1 ? '' : 's'} freed. Total Onboard: ${newTotal}/50.`
         );
       }
     }
@@ -362,7 +388,7 @@ export function PassengerCheckInPage() {
       if (effectiveTripId) setTripId(effectiveTripId);
     }
     if (!effectiveTripId) {
-      setError('🔒 Scanner locked: Trip is not started. Please click "Start Trip" before scanning.');
+      setError('Scanner locked: Trip is not started. Please click "Start Trip" before scanning.');
       dismissSoftKeyboard();
       return;
     }
@@ -466,50 +492,17 @@ export function PassengerCheckInPage() {
       />
 
       {/* TOP SUMMARY CARD */}
-      <section className="card" style={{ background: '#123b3b' }}>
+      <section className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
           <div>
             <h1 style={{ fontSize: '1.5rem', marginBottom: '.3rem' }}>Passenger Check-in & QR Operations</h1>
-            <p style={{ color: '#94a3b8', margin: '.35rem 0 0' }}>
+            <p style={{ color: 'var(--text-muted)', margin: '.35rem 0 0' }}>
               Duty bus: <strong>{dutySession?.plateNumber || occupancy?.bus_plate || 'QC-BUS'}</strong> | Assigned Driver: <strong>{dutySession?.driverName}</strong>
             </p>
           </div>
           <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
-            <button
-              type="button"
-              onClick={() => {
-                const effectiveTripId = tripId || dutySession?.tripId;
-                if (!effectiveTripId) {
-                  setError('🔒 Scanner locked: Trip is not started. Please start the trip before scanning.');
-                  dismissSoftKeyboard();
-                  return;
-                }
-                if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
-                  document.activeElement.blur();
-                }
-                setIsCameraOpen(true);
-              }}
-              disabled={!tripId && !dutySession?.tripId}
-              className={`btn ${(tripId || dutySession?.tripId) ? 'btn-primary' : 'btn-secondary'}`}
-              style={{
-                padding: '.45rem .85rem',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '.4rem',
-                backgroundColor: (tripId || dutySession?.tripId) ? '#0284c7' : 'var(--bg-subtle)',
-                borderColor: (tripId || dutySession?.tripId) ? '#0284c7' : 'var(--border-color)',
-                cursor: (tripId || dutySession?.tripId) ? 'pointer' : 'not-allowed',
-                opacity: (tripId || dutySession?.tripId) ? 1 : 0.6
-              }}
-              title={(tripId || dutySession?.tripId) ? 'Open Camera Scanner' : 'Trip is not started'}
-            >
-              <Camera size={16} /> Open Camera Scanner
-            </button>
-            <div role="status" aria-label="QR scanner is ready" style={{ padding: '.45rem .6rem', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#94a3b8', fontSize: '.85rem' }}>
-              Hardware scanner ready
-            </div>
             <button type="button" onClick={refresh} className="btn btn-secondary">
-              <RefreshCw size={14} /> Refresh
+              Refresh
             </button>
           </div>
         </div>
@@ -517,47 +510,45 @@ export function PassengerCheckInPage() {
         {/* 4 REAL-TIME SEAT CAPACITY & OCCUPANCY METRICS */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginTop: '1.25rem' }}>
           {/* Metric 1: Available Priority Seats (/20) */}
-          <div style={{ backgroundColor: 'rgba(15, 23, 42, 0.65)', border: '1px solid #f59e0b', borderRadius: '10px', padding: '1rem' }}>
+          <div style={{ backgroundColor: 'var(--bg-subtle)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: '1rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.25rem' }}>
-              <span style={{ fontSize: '.75rem', fontWeight: 700, color: '#fbbf24', textTransform: 'uppercase' }}>
+              <span style={{ fontSize: '.75rem', fontWeight: 700, color: 'var(--color-warning)', textTransform: 'uppercase' }}>
                 PRIORITY SEATS AVAILABLE
               </span>
-              <ShieldCheck size={16} color="#fbbf24" />
             </div>
-            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#fef08a' }}>
-              {availablePrioritySeats} <span style={{ fontSize: '1rem', color: '#94a3b8' }}>/ 20</span>
+            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: 'var(--text-main)' }}>
+              {availablePrioritySeats} <span style={{ fontSize: '1rem', color: 'var(--text-muted)' }}>/ 20</span>
             </div>
           </div>
 
           {/* Metric 2: Available Regular Seats (/30) */}
-          <div style={{ backgroundColor: 'rgba(15, 23, 42, 0.65)', border: '1px solid #06b6d4', borderRadius: '10px', padding: '1rem' }}>
+          <div style={{ backgroundColor: 'var(--bg-subtle)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: '1rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.25rem' }}>
-              <span style={{ fontSize: '.75rem', fontWeight: 700, color: '#38bdf8', textTransform: 'uppercase' }}>
+              <span style={{ fontSize: '.75rem', fontWeight: 700, color: 'var(--color-accent)', textTransform: 'uppercase' }}>
                 REGULAR SEATS AVAILABLE
               </span>
-              <UserCheck size={16} color="#38bdf8" />
             </div>
-            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#e0f2fe' }}>
-              {availableRegularSeats} <span style={{ fontSize: '1rem', color: '#94a3b8' }}>/ 30</span>
+            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: 'var(--text-main)' }}>
+              {availableRegularSeats} <span style={{ fontSize: '1rem', color: 'var(--text-muted)' }}>/ 30</span>
             </div>
           </div>
 
           {/* Metric 3: Total Onboard */}
-          <div style={{ backgroundColor: 'rgba(15, 23, 42, 0.65)', border: '1px solid #10b981', borderRadius: '10px', padding: '1rem' }}>
-            <span style={{ fontSize: '.75rem', fontWeight: 700, color: '#34d399', textTransform: 'uppercase', display: 'block', marginBottom: '.25rem' }}>
+          <div style={{ backgroundColor: 'var(--bg-subtle)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: '1rem' }}>
+            <span style={{ fontSize: '.75rem', fontWeight: 700, color: 'var(--color-emerald)', textTransform: 'uppercase', display: 'block', marginBottom: '.25rem' }}>
               TOTAL PASSENGERS ONBOARD
             </span>
-            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#10b981' }}>
-              {totalOnboard} <span style={{ fontSize: '1rem', color: '#94a3b8' }}>/ 50 Capacity</span>
+            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: 'var(--color-emerald)' }}>
+              {totalOnboard} <span style={{ fontSize: '1rem', color: 'var(--text-muted)' }}>/ 50 Capacity</span>
             </div>
           </div>
 
           {/* Metric 4: Total Registered Passes */}
-          <div style={{ backgroundColor: 'rgba(15, 23, 42, 0.65)', border: '1px solid #475569', borderRadius: '10px', padding: '1rem' }}>
-            <span style={{ fontSize: '.75rem', fontWeight: 700, color: '#cbd5e1', textTransform: 'uppercase', display: 'block', marginBottom: '.25rem' }}>
+          <div style={{ backgroundColor: 'var(--bg-subtle)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: '1rem' }}>
+            <span style={{ fontSize: '.75rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '.25rem' }}>
               TOTAL REGISTERED PASSES
             </span>
-            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#f8fafc' }}>
+            <div style={{ fontSize: '1.65rem', fontWeight: 800, color: 'var(--text-main)' }}>
               {registry.length} Passes
             </div>
           </div>
@@ -574,13 +565,12 @@ export function PassengerCheckInPage() {
           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '.5rem' }}>
-            <MapPin size={18} color="#06b6d4" />
             <h2 style={{ fontSize: '1.1rem', margin: 0 }}>
               15 Route 4 Stops — Boarded & Alighting Passenger Counts
             </h2>
           </div>
-          <button type="button" style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>
-            {showStopBreakdown ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+          <button type="button" style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 700 }}>
+            {showStopBreakdown ? 'Hide ▲' : 'Show ▼'}
           </button>
         </div>
 
@@ -588,7 +578,7 @@ export function PassengerCheckInPage() {
           <div style={{ marginTop: '1rem', overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '.85rem' }}>
               <thead>
-                <tr style={{ borderBottom: '1px solid var(--border-color)', color: '#94a3b8' }}>
+                <tr style={{ borderBottom: '1px solid var(--border-color)', color: 'var(--text-muted)' }}>
                   <th style={{ textAlign: 'left', padding: '.6rem' }}>Stop #</th>
                   <th style={{ textAlign: 'left', padding: '.6rem' }}>Designated Stop Name</th>
                   <th style={{ textAlign: 'center', padding: '.6rem' }}>Boarded Passengers</th>
@@ -600,24 +590,24 @@ export function PassengerCheckInPage() {
                 {ROUTE4_STOPS.map((stop, sIdx) => {
                   const stats = getStopStats(stop.name);
                   return (
-                    <tr key={stop.id || sIdx} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                    <tr key={stop.id || sIdx} style={{ borderBottom: '1px solid var(--border-color)' }}>
                       <td style={{ padding: '.6rem' }}>
-                        <span className="badge" style={{ backgroundColor: '#0284c7', color: '#fff', fontSize: '.75rem' }}>
+                        <span className="badge" style={{ backgroundColor: 'var(--bg-subtle)', border: '1px solid var(--border-color)', color: 'var(--text-main)', fontSize: '.75rem' }}>
                           Stop {sIdx + 1}
                         </span>
                       </td>
                       <td style={{ padding: '.6rem', fontWeight: 600 }}>{stop.name}</td>
                       <td style={{ padding: '.6rem', textAlign: 'center' }}>
-                        <span style={{ fontWeight: 800, color: stats.boarded > 0 ? '#10b981' : '#64748b' }}>
-                          ↑ {stats.boarded}
+                        <span style={{ fontWeight: 800, color: stats.boarded > 0 ? 'var(--color-emerald)' : 'var(--text-dim)' }}>
+                          {stats.boarded}
                         </span>
                       </td>
                       <td style={{ padding: '.6rem', textAlign: 'center' }}>
-                        <span style={{ fontWeight: 800, color: stats.alighting > 0 ? '#ef4444' : '#64748b' }}>
-                          ↓ {stats.alighting}
+                        <span style={{ fontWeight: 800, color: stats.alighting > 0 ? 'var(--color-danger)' : 'var(--text-dim)' }}>
+                          {stats.alighting}
                         </span>
                       </td>
-                      <td style={{ padding: '.6rem', textAlign: 'center', color: '#94a3b8' }}>
+                      <td style={{ padding: '.6rem', textAlign: 'center', color: 'var(--text-muted)' }}>
                         {stats.completedAlighted}
                       </td>
                     </tr>
@@ -631,12 +621,12 @@ export function PassengerCheckInPage() {
 
       {/* DAILY PASSENGER REGISTER TABLE */}
       <section className="card" style={{ overflowX: 'auto' }}>
-        <h2 style={{ fontSize: '1.1rem', display: 'flex', gap: '.5rem', alignItems: 'center', marginBottom: '.75rem' }}>
-          <Users size={18} /> Daily Passenger Register & Seating Quotas
+        <h2 style={{ fontSize: '1.1rem', marginBottom: '.75rem' }}>
+          Daily Passenger Register & Seating Quotas
         </h2>
         <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '950px' }}>
           <thead>
-            <tr style={{ borderBottom: '1px solid var(--border-color)', color: '#94a3b8', fontSize: '.85rem' }}>
+            <tr style={{ borderBottom: '1px solid var(--border-color)', color: 'var(--text-muted)', fontSize: '.85rem' }}>
               {['Pass ID', 'Passenger Name', 'Category / Seat Quota', 'Boarding Stop', 'Destination Stop', 'Boarded At', 'Alighted At', 'Status', 'Action'].map((head) => (
                 <th key={head} style={{ textAlign: 'left', padding: '.7rem' }}>{head}</th>
               ))}
@@ -645,30 +635,30 @@ export function PassengerCheckInPage() {
           <tbody>
             {registry.length === 0 ? (
               <tr>
-                <td colSpan="9" style={{ padding: '1.5rem', textAlign: 'center', color: '#94a3b8' }}>
+                <td colSpan="9" style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
                   No passenger registrations for this trip yet. Scan commuter passes above to register passengers.
                 </td>
               </tr>
             ) : (
               registry.map((journey, index) => {
-                const passengerName = journey.passenger_name || journey.profiles?.full_name || journey.profiles?.email || 'Passenger';
-                const passId = journey.qr_token && /^\d{6}-\d{5}$/.test(journey.qr_token)
+                const passengerName = journey.passenger_name || journey.profiles?.full_name || journey.profiles?.email || 'Anonymous Passenger';
+                const passId = journey.pass_id || (journey.qr_token && (journey.qr_token.startsWith('ANON-') || /^\d{6}-\d{5}$/.test(journey.qr_token))
                   ? journey.qr_token
-                  : dailyIds[index];
+                  : dailyIds[index]);
                 const category = journey.passenger_category || journey.profiles?.passenger_category || journey.category || 'Regular';
                 const isPri = isPriorityCategory(category);
 
                 return (
-                  <tr key={journey.id} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)', fontSize: '.88rem' }}>
-                    <td style={{ padding: '.7rem', fontWeight: 700, color: '#38bdf8' }}>{passId}</td>
+                  <tr key={journey.id} style={{ borderBottom: '1px solid var(--border-color)', fontSize: '.88rem' }}>
+                    <td style={{ padding: '.7rem', fontWeight: 700, color: 'var(--color-accent)' }}>{passId}</td>
                     <td style={{ padding: '.7rem', fontWeight: 600 }}>{passengerName}</td>
                     <td style={{ padding: '.7rem' }}>
                       <span
                         className="badge"
                         style={{
                           backgroundColor: isPri ? 'rgba(245, 158, 11, 0.2)' : 'rgba(6, 182, 212, 0.2)',
-                          color: isPri ? '#fbbf24' : '#38bdf8',
-                          border: `1px solid ${isPri ? '#f59e0b' : '#06b6d4'}`,
+                          color: isPri ? 'var(--color-warning)' : 'var(--color-accent)',
+                          border: `1px solid ${isPri ? 'var(--color-warning)' : 'var(--color-accent)'}`,
                           fontSize: '.75rem',
                           fontWeight: 700
                         }}
@@ -677,7 +667,7 @@ export function PassengerCheckInPage() {
                       </span>
                     </td>
                     <td style={{ padding: '.7rem' }}>{journey.origin_name || 'Stop 1'}</td>
-                    <td style={{ padding: '.7rem', color: '#38bdf8' }}>{journey.destination_name || 'End Stop'}</td>
+                    <td style={{ padding: '.7rem', color: 'var(--color-accent)' }}>{journey.destination_name || 'End Stop'}</td>
                     <td style={{ padding: '.7rem' }}>{timeLabel(journey.boarded_at)}</td>
                     <td style={{ padding: '.7rem' }}>{timeLabel(journey.alighted_at)}</td>
                     <td style={{ padding: '.7rem' }}>
@@ -697,7 +687,7 @@ export function PassengerCheckInPage() {
                           onClick={() => recordEvent(journey, 'board')}
                           style={{ padding: '.35rem .75rem', fontSize: '.8rem' }}
                         >
-                          <CheckCircle size={13} /> Board
+                          Board
                         </button>
                       )}
                       {journey.status === 'boarded' && (
@@ -711,8 +701,8 @@ export function PassengerCheckInPage() {
                           Alight
                         </button>
                       )}
-                      {journey.status === 'completed' && <span style={{ color: '#10b981', fontWeight: 700 }}>✓ Alighted</span>}
-                      {journey.status === 'cancelled' && <span style={{ color: '#ef4444' }}>Cancelled</span>}
+                      {journey.status === 'completed' && <span style={{ color: 'var(--color-emerald)', fontWeight: 700 }}>Alighted</span>}
+                      {journey.status === 'cancelled' && <span style={{ color: 'var(--color-danger)' }}>Cancelled</span>}
                     </td>
                   </tr>
                 );

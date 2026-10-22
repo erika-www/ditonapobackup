@@ -7,7 +7,7 @@
  * - Per-stop boarded & alighting counters across all 15 Route 4 stops
  * - Automatic GPS arrival detection triggering manual registration
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import {
   fetchConfiguredRoute4Stops,
@@ -34,11 +34,6 @@ import { ROUTE4_STOPS, SOUTHBOUND_ROUTE4_STOPS, applyRoute4CoordinateOverrides, 
 import { getStopRecommendedBoarding } from '@shared/queueAndBoardingService';
 import { parsePassengerQRCode, isPriorityCategory, hasPriorityInParty } from '@shared/qrPassUtils';
 import { QrCameraScannerModal } from '../components/QrCameraScannerModal';
-import {
-  Users, MapPin, ArrowUp, ArrowDown, Play, Pause, Square,
-  RotateCcw, ShieldCheck, UserCheck,
-  Volume2, VolumeX, Camera, Sparkles
-} from 'lucide-react';
 
 export function RouteInformationPage() {
   const { dutySession, updateDutySession, isTestMode } = useAuth();
@@ -60,6 +55,7 @@ export function RouteInformationPage() {
   const [isTripActive, setIsTripActive] = useState(false);
   const [tripCount, setTripCount] = useState(1);
   const [statusMessage, setStatusMessage] = useState(null);
+  const [statusType, setStatusType] = useState('success');
 
   const testRegistryKey = `qcbus_test_registry_${dutySession?.tripId || 'local'}_${new Date().toISOString().slice(0, 10)}`;
   const tripSegmentKey = `${testRegistryKey}_started_at`;
@@ -165,7 +161,7 @@ export function RouteInformationPage() {
         state.trips_done > lastTripsDoneRef.current
       ) {
         setIsTripActive(false);
-        setStatusMessage('🏁 Trip completed! Pi 3B Announcer reached final terminus stop.');
+        setStatusMessage('Trip completed! Pi 3B Announcer reached final terminus stop.');
       }
     };
 
@@ -311,13 +307,46 @@ export function RouteInformationPage() {
     return () => { cancelled = true; clearInterval(timer); };
   }, [dutySession?.tripId, dutySession?.plateNumber, operationalTripId, isTestMode, tripSegmentStartedAt, isTripActive, testRegistryKey]);
 
-  useEffect(() => {
+  const saveAndSyncRegistry = useCallback((nextRegistry) => {
     try {
       const plate = dutySession?.plateNumber || 'QC-BUS';
-      const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
-      localStorage.setItem(key, JSON.stringify(passengerRegistry));
+      localStorage.setItem(`qcbus_registry_${plate}`, JSON.stringify(nextRegistry));
+      if (isTestMode && testRegistryKey) {
+        localStorage.setItem(testRegistryKey, JSON.stringify(nextRegistry));
+      }
+      window.dispatchEvent(new CustomEvent('qcbus_registry_sync', { detail: { plate, rows: nextRegistry } }));
     } catch (_) {}
-  }, [isTestMode, passengerRegistry, testRegistryKey, dutySession?.plateNumber]);
+  }, [dutySession?.plateNumber, isTestMode, testRegistryKey]);
+
+  useEffect(() => {
+    saveAndSyncRegistry(passengerRegistry);
+  }, [passengerRegistry, saveAndSyncRegistry]);
+
+  useEffect(() => {
+    const handleSync = () => {
+      try {
+        const plate = dutySession?.plateNumber || 'QC-BUS';
+        const saved = localStorage.getItem(`qcbus_registry_${plate}`) || (isTestMode ? localStorage.getItem(testRegistryKey) : null);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            setPassengerRegistry((prev) => {
+              if (JSON.stringify(prev) === saved) return prev;
+              return parsed;
+            });
+          }
+        }
+      } catch (_) {}
+    };
+    window.addEventListener('qcbus_registry_sync', handleSync);
+    window.addEventListener('storage', handleSync);
+    window.addEventListener('focus', handleSync);
+    return () => {
+      window.removeEventListener('qcbus_registry_sync', handleSync);
+      window.removeEventListener('storage', handleSync);
+      window.removeEventListener('focus', handleSync);
+    };
+  }, [dutySession?.plateNumber, isTestMode, testRegistryKey]);
 
   const currentStop = stopsList[currentStopIndex] || stopsList[0];
   const normalizeStopName = (name) => String(name || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -334,14 +363,29 @@ export function RouteInformationPage() {
     return normalizeStopName(strA) === normalizeStopName(strB);
   };
 
-  // Calculate Priority vs Regular Seat Quotas (20 Priority, 30 Regular = 50 total)
-  const priorityBoarded = passengerRegistry.filter((journey) => journey.status === 'boarded').reduce((acc, curr) => {
+  // Direction isolation helper to prevent Northbound stop counts carrying over to Southbound
+  const isJourneyMatchingDirection = (journey, activeDir) => {
+    if (!journey) return false;
+    const target = String(activeDir || direction || 'Northbound').toLowerCase();
+    const jDir = journey.direction || journey.route_direction || journey.routeDirection || journey.trip_direction;
+    if (jDir) {
+      return String(jDir).toLowerCase() === target;
+    }
+    if (journey.origin_name && journey.destination_name) {
+      const inferred = detectPassengerDirection(journey.origin_name, journey.destination_name);
+      if (inferred) return inferred.toLowerCase() === target;
+    }
+    return target === 'northbound';
+  };
+
+  // Calculate Priority vs Regular Seat Quotas (20 Priority, 30 Regular = 50 total) for current direction
+  const priorityBoarded = passengerRegistry.filter((journey) => journey.status === 'boarded' && isJourneyMatchingDirection(journey, direction)).reduce((acc, curr) => {
     if (curr.priority_count != null) return acc + Number(curr.priority_count);
     const isPri = isPriorityCategory(curr.passenger_category || curr.profiles?.passenger_category || curr.category);
     return acc + (isPri ? (Number(curr.count) || 1) : 0);
   }, 0);
 
-  const regularBoarded = passengerRegistry.filter((journey) => journey.status === 'boarded').reduce((acc, curr) => {
+  const regularBoarded = passengerRegistry.filter((journey) => journey.status === 'boarded' && isJourneyMatchingDirection(journey, direction)).reduce((acc, curr) => {
     if (curr.regular_count != null) return acc + Number(curr.regular_count);
     const isPri = isPriorityCategory(curr.passenger_category || curr.profiles?.passenger_category || curr.category);
     return acc + (!isPri ? (Number(curr.count) || 1) : 0);
@@ -354,25 +398,25 @@ export function RouteInformationPage() {
   const availableRegularSeats = Math.max(0, regularSeatCapacity - regularBoarded);
   const totalOnboard = priorityBoarded + regularBoarded;
 
-  // Boarded & Alighting counters per stop using canonical stop resolution
+  // Boarded & Alighting counters per stop using canonical stop resolution (direction-isolated)
   const passengersBoardedAt = (stopName) => {
     return passengerRegistry.filter((journey) => {
       const isBoardedOrDone = journey.status === 'boarded' || journey.status === 'completed';
-      return isBoardedOrDone && isSameStop(journey.origin_name, stopName);
+      return isBoardedOrDone && isJourneyMatchingDirection(journey, direction) && isSameStop(journey.origin_name, stopName);
     }).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
   };
 
   const passengersAlightingAt = (stopName) => {
     return passengerRegistry.filter((journey) => {
       const isCurrentlyBoarded = journey.status === 'boarded';
-      return isCurrentlyBoarded && isSameStop(journey.destination_name, stopName);
+      return isCurrentlyBoarded && isJourneyMatchingDirection(journey, direction) && isSameStop(journey.destination_name, stopName);
     }).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
   };
 
   const passengersCompletedAlightedAt = (stopName) => {
     return passengerRegistry.filter((journey) => {
       const isCompleted = journey.status === 'completed';
-      return isCompleted && isSameStop(journey.destination_name, stopName);
+      return isCompleted && isJourneyMatchingDirection(journey, direction) && isSameStop(journey.destination_name, stopName);
     }).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
   };
 
@@ -543,7 +587,7 @@ export function RouteInformationPage() {
       const nextRows = prevRows.map((row) => {
         if (row.status !== 'boarded') return row;
         const reachedDestination = isSameStop(row.destination_name, targetStop.name);
-        if (reachedDestination || isTargetDestination) {
+        if ((reachedDestination || isTargetDestination) && isJourneyMatchingDirection(row, direction)) {
           hasChanges = true;
           const pax = Math.max(1, Number(row.count || row.passenger_count) || 1);
           autoCompletedCount += pax;
@@ -560,9 +604,7 @@ export function RouteInformationPage() {
 
       if (hasChanges) {
         try {
-          const plate = dutySession?.plateNumber || 'QC-BUS';
-          const regKey = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
-          localStorage.setItem(regKey, JSON.stringify(nextRows));
+          saveAndSyncRegistry(nextRows);
 
           // Sync destination arrival so passenger app marks journey completed
           completedJourneys.forEach((j) => {
@@ -638,12 +680,12 @@ export function RouteInformationPage() {
       : '';
 
     const autoAlightNotice = autoCompletedCount > 0
-      ? ` 🏁 ${autoCompletedCount} passenger${autoCompletedCount === 1 ? '' : 's'} reached destination! Journey completed & seats restored.`
+      ? ` ${autoCompletedCount} passenger${autoCompletedCount === 1 ? '' : 's'} reached destination! Journey completed & seats restored.`
       : '';
 
     setStatusMessage(isTargetDestination
-      ? `🏁 TARGET DESTINATION REACHED: Stop ${stopIdx + 1} (${targetStop.name})${distInfo}! Final terminus reached.${autoAlightNotice} Passenger alighting opened.`
-      : `📍 Bus arrived at Stop ${stopIdx + 1} (${targetStop.name})${distInfo}.${autoAlightNotice} Passenger registration opened.`);
+      ? `TARGET DESTINATION REACHED: Stop ${stopIdx + 1} (${targetStop.name})${distInfo}! Final terminus reached.${autoAlightNotice} Passenger alighting opened.`
+      : `Bus arrived at Stop ${stopIdx + 1} (${targetStop.name})${distInfo}.${autoAlightNotice} Passenger registration opened.`);
 
     // Immediately reflect vehicle location at arrived stop to Supabase so passenger app live map & destination detector trigger
     if (Number.isFinite(Number(targetStop.lat)) && Number.isFinite(Number(targetStop.lng))) {
@@ -733,7 +775,7 @@ export function RouteInformationPage() {
         // 2. APPROACHING DETECTION
         if (distToTarget <= APPROACH_RADIUS_METERS && tripPhase !== 'at_stop' && tripPhase !== 'approaching') {
           setTripPhase('approaching');
-          setStatusMessage(`📍 Approaching Stop ${targetIdx + 1}: ${headingStop?.name} (${Math.round(distToTarget)}m away)`);
+          setStatusMessage(`Approaching Stop ${targetIdx + 1}: ${headingStop?.name} (${Math.round(distToTarget)}m away)`);
         }
 
         // 3. DEPARTURE DETECTION
@@ -751,7 +793,7 @@ export function RouteInformationPage() {
         processGpsFix(fix);
         const src = fix.source === 'g703_serial' ? 'G-703 USB' : (fix.source || 'G-703');
         const sats = fix.satellites ? ` · ${fix.satellites} satellites` : '';
-        setStatusMessage(`📍 ${src} GPS fix: ${fix.latitude.toFixed(5)}, ${fix.longitude.toFixed(5)}${sats}`);
+        setStatusMessage(`${src} GPS fix: ${fix.latitude.toFixed(5)}, ${fix.longitude.toFixed(5)}${sats}`);
       } else {
         setStatusMessage('G-703 GPS: Waiting for satellite fix or GPS lost (>5s).');
       }
@@ -969,8 +1011,7 @@ export function RouteInformationPage() {
 
       try {
         const plate = dutySession?.plateNumber || 'QC-BUS';
-        const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
-        localStorage.setItem(key, JSON.stringify(nextRows));
+        saveAndSyncRegistry(nextRows);
         localStorage.setItem(`qcbus_scanned_${token}`, JSON.stringify({
           status: updatedJourney.status,
           scanned_at: now,
@@ -1040,12 +1081,12 @@ export function RouteInformationPage() {
       const remainingRegular = Math.max(0, availableRegularSeats - paxRegCount);
       const newTotal = totalOnboard + count;
       setStatusMessage(
-        `✓ ${count} PASSENGER${count === 1 ? '' : 'S'} BOARDED (${cat}). Total Onboard: ${newTotal}/${busCapacity}. Remaining: ${remainingPriority} Priority / ${remainingRegular} Regular. Boarding at: ${resolvedOrigin.name} → Destination: ${resolvedDestination.name}.`
+        `${count} PASSENGER${count === 1 ? '' : 'S'} BOARDED (${cat}). Total Onboard: ${newTotal}/${busCapacity}. Remaining: ${remainingPriority} Priority / ${remainingRegular} Regular. Boarding at: ${resolvedOrigin.name} -> Destination: ${resolvedDestination.name}.`
       );
     } else {
       const newTotal = Math.max(0, totalOnboard - count);
       setStatusMessage(
-        `✓ ${count} PASSENGER${count === 1 ? '' : 'S'} ALIGHTED at ${resolvedDestination.name}. ${count} seat${count === 1 ? '' : 's'} restored. Total Onboard: ${newTotal}/${busCapacity}.`
+        `${count} PASSENGER${count === 1 ? '' : 'S'} ALIGHTED at ${resolvedDestination.name}. ${count} seat${count === 1 ? '' : 's'} restored. Total Onboard: ${newTotal}/${busCapacity}.`
       );
     }
 
@@ -1217,16 +1258,16 @@ export function RouteInformationPage() {
       const displayedTrip = forceNewTrip ? tripCount + 1 : tripCount;
 
       if (bridgeRes.ok || bridgeRes.success) {
-        setStatusMessage(`✓ Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. G-703 GPS & Announcer active.`);
+        setStatusMessage(`Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. G-703 GPS & Announcer active.`);
       } else if (bridgeRes.conflict || bridgeRes.status === 409) {
         setIsTripActive(true);
-        setStatusMessage(`ℹ️ Trip is already active on Pi 3B (${direction}) — continuing active trip.`);
+        setStatusMessage(`Trip is already active on Pi 3B (${direction}) — continuing active trip.`);
       } else {
         setStatusMessage(`Trip started with G-703 GPS tracking. (Notice: ${bridgeRes.error || 'Bridge notice'})`);
       }
     } else {
       const displayedTrip = forceNewTrip ? tripCount + 1 : tripCount;
-      setStatusMessage(`✓ Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. G-703 GPS tracking active.`);
+      setStatusMessage(`Trip #${displayedTrip} (${direction}) started at ${stopsList[0]?.name || 'Origin'}. G-703 GPS tracking active.`);
     }
 
     setTimeout(() => setStatusMessage(null), 6000);
@@ -1243,12 +1284,12 @@ export function RouteInformationPage() {
     if (announcerInfo.online) {
       const bridgeRes = await sendTripEnd();
       if (bridgeRes.ok || bridgeRes.success) {
-        setStatusMessage('✓ Trip ended. Announcer set to standby.');
+        setStatusMessage('Trip ended. Announcer set to standby.');
       } else {
         setStatusMessage(`Trip ended. (${bridgeRes.error || 'Standby'})`);
       }
     } else {
-      setStatusMessage('✓ Trip ended. System set to standby.');
+      setStatusMessage('Trip ended. System set to standby.');
     }
 
     // Prompt to alight any remaining onboard passengers
@@ -1269,7 +1310,7 @@ export function RouteInformationPage() {
     const alightingJourneys = passengerRegistry.filter((journey) => {
       const isCurrentlyBoarded = journey.status === 'boarded';
       const stopCanonical = resolveRoute4Stop(journey.destination_name)?.name || journey.destination_name;
-      return isCurrentlyBoarded && stopCanonical === targetCanonical;
+      return isCurrentlyBoarded && isJourneyMatchingDirection(journey, direction) && stopCanonical === targetCanonical;
     });
 
     if (alightingJourneys.length === 0) return;
@@ -1285,15 +1326,11 @@ export function RouteInformationPage() {
         }
         return j;
       });
-      try {
-        const plate = dutySession?.plateNumber || 'QC-BUS';
-        const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
-        localStorage.setItem(key, JSON.stringify(next));
-      } catch (_) {}
+      saveAndSyncRegistry(next);
       return next;
     });
 
-    setStatusMessage(`✓ ${totalAlightingPax} passenger${totalAlightingPax === 1 ? '' : 's'} alighted at ${targetCanonical}. Freed seats and updated onboard count.`);
+    setStatusMessage(`${totalAlightingPax} passenger${totalAlightingPax === 1 ? '' : 's'} alighted at ${targetCanonical}. Freed seats and updated onboard count.`);
 
     // Sync in background
     let activeTripId = operationalTripId || dutySession?.tripId;
@@ -1318,29 +1355,26 @@ export function RouteInformationPage() {
 
   const handleAlightAllRemainingPassengers = async () => {
     const now = new Date().toISOString();
-    const onboardJourneys = passengerRegistry.filter((j) => j.status === 'boarded');
+    const onboardJourneys = passengerRegistry.filter((j) => j.status === 'boarded' && isJourneyMatchingDirection(j, direction));
     if (onboardJourneys.length === 0) return;
 
     const totalPax = onboardJourneys.reduce((sum, j) => sum + (Number(j.count) || 1), 0);
 
     setPassengerRegistry((prev) => {
-      const next = prev.map((j) => j.status === 'boarded' ? { ...j, status: 'completed', alighted_at: now } : j);
-      try {
-        const plate = dutySession?.plateNumber || 'QC-BUS';
-        const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
-        localStorage.setItem(key, JSON.stringify(next));
-      } catch (_) {}
+      const next = prev.map((j) => (j.status === 'boarded' && isJourneyMatchingDirection(j, direction)) ? { ...j, status: 'completed', alighted_at: now } : j);
+      saveAndSyncRegistry(next);
       return next;
     });
 
-    setStatusMessage(`✓ All ${totalPax} remaining passengers alighted at ${currentStop.name}. Trip complete.`);
+    setStatusMessage(`All ${totalPax} remaining passengers alighted at ${currentStop.name}. Trip complete.`);
   };
 
   const handleManualRegistration = async (event) => {
     event.preventDefault();
     if (!manualDestination || manualSubmissionRef.current) return;
     if (!isTripActive) {
-      setStatusMessage('Passenger registration failed: Start the trip first.');
+      setStatusType('error');
+      setStatusMessage('Registration Failed');
       return;
     }
     manualSubmissionRef.current = true;
@@ -1349,19 +1383,13 @@ export function RouteInformationPage() {
     const count = Math.max(1, Number(manualPassengerCount) || 1);
     const capacity = busCapacity;
     if (totalOnboard + count > capacity) {
-      setStatusMessage(`Passenger registration failed: Only ${Math.max(0, capacity - totalOnboard)} available seat${Math.max(0, capacity - totalOnboard) === 1 ? '' : 's'} remaining.`);
+      setStatusType('error');
+      setStatusMessage('Registration Failed');
       setManualRegistrationBusy(false);
       manualSubmissionRef.current = false;
       return;
     }
     const isPri = isPriorityCategory(manualPassengerCategory);
-    const categoryAvailable = isPri ? availablePrioritySeats : availableRegularSeats;
-    if (count > categoryAvailable) {
-      setStatusMessage(`Passenger registration failed: Only ${categoryAvailable} ${isPri ? 'priority' : 'regular'} seat${categoryAvailable === 1 ? '' : 's'} available.`);
-      setManualRegistrationBusy(false);
-      manualSubmissionRef.current = false;
-      return;
-    }
 
     let activeTripId = operationalTripId || dutySession?.tripId || null;
     if (!activeTripId) {
@@ -1375,22 +1403,22 @@ export function RouteInformationPage() {
     const canonicalOrigin = resolveRoute4Stop(currentStop.name)?.name || currentStop.name;
     const canonicalDest = resolveRoute4Stop(manualDestination)?.name || manualDestination;
     const now = new Date().toISOString();
-    const fallbackId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : 'manual-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+    const anonPassId = 'ANON-' + Math.floor(100000 + Math.random() * 900000);
+    const anonPassengerName = 'Anonymous Passenger';
 
     // Attempt DB creation
     let createdJourney = null;
     try {
       const created = await createManualPassengerJourney({
-        passengerName: `Anonymous Passenger (${manualPassengerCategory})`,
+        passengerName: anonPassengerName,
         passengerCategory: manualPassengerCategory,
         origin: canonicalOrigin,
         destination: canonicalDest,
         tripId: activeTripId,
         routeDirection: direction,
         passengerCount: count,
-        status: 'boarded'
+        status: 'boarded',
+        passId: anonPassId
       });
       if (created.success && created.data) {
         createdJourney = created.data;
@@ -1400,10 +1428,13 @@ export function RouteInformationPage() {
     }
 
     const localJourney = {
-      id: createdJourney?.id || fallbackId,
-      qr_token: createdJourney?.qr_token || fallbackId,
+      id: createdJourney?.id || anonPassId,
+      pass_id: anonPassId,
+      qr_token: createdJourney?.qr_token || anonPassId,
       trip_id: activeTripId,
-      passenger_name: `Manual Commuter (${manualPassengerCategory})`,
+      direction: direction,
+      route_direction: direction,
+      passenger_name: anonPassengerName,
       passenger_category: manualPassengerCategory,
       is_priority: isPri,
       origin_name: canonicalOrigin,
@@ -1414,18 +1445,10 @@ export function RouteInformationPage() {
       registration_source: 'manual_stop_arrival'
     };
 
-    // Immediately update local passengerRegistry so:
-    // 1. passengersBoardedAt(currentStop.name) increments by count
-    // 2. passengersAlightingAt(manualDestination) increments by count
-    // 3. totalOnboard increments by count
-    // 4. available seats decrement
+    // Immediately update local passengerRegistry and broadcast sync
     setPassengerRegistry((prev) => {
       const next = [...prev, localJourney];
-      try {
-        const plate = dutySession?.plateNumber || 'QC-BUS';
-        const key = isTestMode ? testRegistryKey : `qcbus_registry_${plate}`;
-        localStorage.setItem(key, JSON.stringify(next));
-      } catch (_) {}
+      saveAndSyncRegistry(next);
       return next;
     });
 
@@ -1440,12 +1463,8 @@ export function RouteInformationPage() {
       }).catch((e) => console.warn('Record boarding event notice:', e.message));
     }
 
-    const remainingPriority = isPri ? Math.max(0, availablePrioritySeats - count) : availablePrioritySeats;
-    const remainingRegular = !isPri ? Math.max(0, availableRegularSeats - count) : availableRegularSeats;
-    const stopTotal = passengersBoardedAt(canonicalOrigin) + count;
-    setStatusMessage(
-      `✓ ${count} passenger${count === 1 ? '' : 's'} boarded at ${canonicalOrigin}. Stop total boarded: ${stopTotal}. Destination: ${canonicalDest} (will alight at Stop ${stopsList.findIndex(s => s.name === canonicalDest) + 1}). Seats: ${remainingPriority} Priority / ${remainingRegular} Regular.`
-    );
+    setStatusType('success');
+    setStatusMessage('Registration Success');
     setShowManualRegistration(false);
     setManualRegistrationBusy(false);
     manualSubmissionRef.current = false;
@@ -1474,365 +1493,209 @@ export function RouteInformationPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'auto', minHeight: 'calc(100vh - 5rem)', gap: '0.6rem', boxSizing: 'border-box' }}>
-      {/* TOP METRICS BAR */}
-      <div className="card" style={{ padding: '0.75rem 1rem', flexShrink: 0, backgroundColor: 'var(--bg-card)' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
-          {/* Driver & Unit Info */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+      {/* TOP CONTAINER (Matching Attached Design 1) */}
+      <div
+        className="card"
+        style={{
+          padding: '1rem 1.25rem',
+          flexShrink: 0,
+          backgroundColor: 'var(--bg-card)',
+          border: '1px solid var(--border-color)',
+          borderRadius: 'var(--radius-md)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '1.25rem'
+        }}
+      >
+        {/* Left: Driver / Conductor / Plate & Direction Buttons + Start Trip */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.95rem' }}>
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <span className={`badge ${isTripActive ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: '0.72rem', padding: '0.15rem 0.5rem' }}>
-                  {isTripActive ? <><span className="pulse-dot"></span> TRIP #{tripCount} IN PROGRESS</> : `IDLE (TRIP #${tripCount})`}
-                </span>
-                {announcerInfo.online ? (
-                  <span
-                    className="badge badge-success"
-                    style={{
-                      fontSize: '0.72rem',
-                      padding: '0.15rem 0.5rem',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.25rem'
-                    }}
-                    title="Pi 3B Bus Announcer is connected and responsive"
-                  >
-                    <Volume2 size={12} /> ✓ Pi 3B Announcer Online
-                  </span>
-                ) : (
-                  <span
-                    className="badge"
-                    style={{
-                      fontSize: '0.72rem',
-                      padding: '0.15rem 0.5rem',
-                      backgroundColor: 'rgba(239, 68, 68, 0.15)',
-                      color: '#f87171',
-                      border: '1px solid #ef4444',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.25rem'
-                    }}
-                    title="Pi 3B Announcer unreachable or bridge offline"
-                  >
-                    <VolumeX size={12} /> Pi 3B Announcer Offline
-                  </span>
-                )}
-                <span
-                  className="badge"
-                  style={{
-                    fontSize: '0.72rem',
-                    padding: '0.15rem 0.5rem',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '0.25rem',
-                    backgroundColor: deviceGps.active
-                      ? 'rgba(16, 185, 129, 0.15)'
-                      : (deviceGps.error === 'GPS lost' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(245, 158, 11, 0.15)'),
-                    color: deviceGps.active
-                      ? '#34d399'
-                      : (deviceGps.error === 'GPS lost' ? '#f87171' : '#f59e0b'),
-                    border: `1px solid ${deviceGps.active ? '#10b981' : (deviceGps.error === 'GPS lost' ? '#ef4444' : '#f59e0b')}`
-                  }}
-                  title={deviceGps.active ? `Live G-703 GPS position: ${deviceGps.latitude?.toFixed(5)}, ${deviceGps.longitude?.toFixed(5)} (${deviceGps.source || 'G-703'}${deviceGps.satellites ? ` · ${deviceGps.satellites} satellites` : ''})` : (deviceGps.error || 'Acquiring G-703 GPS fix')}
-                >
-                  <MapPin size={12} />
-                  {deviceGps.active
-                    ? `🛰️ G-703 GPS Active (${deviceGps.speed ? `${deviceGps.speed.toFixed(1)} km/h` : 'Locked'}${deviceGps.satellites ? ` · ${deviceGps.satellites} sats` : ''})`
-                    : (deviceGps.error === 'GPS lost' ? '🛰️ G-703: Lost (>5s)' : (deviceGps.error ? `🛰️ G-703: ${deviceGps.error}` : '🛰️ G-703: Acquiring...'))}
-                </span>
-                <button
-                  type="button"
-                  onClick={requestImmediateGpsFix}
-                  className="btn btn-secondary"
-                  style={{ padding: '0.12rem 0.45rem', fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
-                  title="Poll latest GPS fix from Pi 4 G-703 receiver"
-                >
-                  <RotateCcw size={10} /> Poll G-703 GPS
-                </button>
-                {isTripActive && (
-                  <button
-                    type="button"
-                    onClick={simulateNextStopArrival}
-                    className="btn btn-secondary"
-                    style={{
-                      padding: '0.12rem 0.5rem',
-                      fontSize: '0.7rem',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.25rem',
-                      backgroundColor: 'rgba(6, 182, 212, 0.15)',
-                      border: '1px solid #06b6d4',
-                      color: '#38bdf8'
-                    }}
-                    title="Simulate GPS movement arriving at next stop along Route 4"
-                  >
-                    <Sparkles size={11} /> Simulate Next Stop
-                  </button>
-                )}
-                <strong style={{ fontSize: '1.05rem', color: 'var(--text-main)' }}>QC Bus Route 4</strong>
-              </div>
-              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
-                Driver: <strong>{dutySession.driverName}</strong> ({dutySession.driverId}) | Unit: <strong>{dutySession.plateNumber || 'QC-BUS'}</strong>
-                {deviceGps.active && (
-                  <span style={{ marginLeft: '0.5rem', color: '#10b981', fontWeight: 600 }}>
-                    · Broadcast Position: {deviceGps.latitude?.toFixed(4)}, {deviceGps.longitude?.toFixed(4)}
-                  </span>
-                )}
-              </div>
+              <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Driver Name: </span>
+              <span style={{ color: 'var(--text-main)' }}>{dutySession.driverName || '—'}</span>
             </div>
-
-            {/* NORTHBOUND & SOUTHBOUND OPTIONS & START/END TRIP BUTTONS */}
-            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
-              <div style={{ display: 'flex', gap: '0.25rem', backgroundColor: 'var(--bg-subtle)', padding: '0.2rem', borderRadius: '6px', border: '1px solid var(--border-color)', width: 'fit-content' }}>
-                <button
-                  type="button"
-                  onClick={() => handleDirectionToggle('Northbound')}
-                  className={`btn ${direction === 'Northbound' ? 'btn-primary' : 'btn-secondary'}`}
-                  style={{ padding: '0.2rem 0.65rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
-                  title="Store Northbound direction (sends to 3B when Start Trip is clicked)"
-                >
-                  Northbound <ArrowUp size={12} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDirectionToggle('Southbound')}
-                  className={`btn ${direction === 'Southbound' ? 'btn-primary' : 'btn-secondary'}`}
-                  style={{ padding: '0.2rem 0.65rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
-                  title="Store Southbound direction (sends to 3B when Start Trip is clicked)"
-                >
-                  Southbound <ArrowDown size={12} />
-                </button>
-              </div>
-
-              {/* START TRIP / END TRIP TRIGGER BUTTONS (RULE 1) */}
-              {!isTripActive ? (
-                <button
-                  type="button"
-                  onClick={() => handleStartTrip(false)}
-                  className="btn btn-primary"
-                  style={{
-                    padding: '0.22rem 0.85rem',
-                    fontSize: '0.76rem',
-                    fontWeight: 800,
-                    backgroundColor: '#10b981',
-                    borderColor: '#10b981',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.35rem',
-                    boxShadow: '0 0 10px rgba(16, 185, 129, 0.4)'
-                  }}
-                  title={`Start ${direction} trip and send POST /api/trip/start to Pi 3B Announcer`}
-                >
-                  <Play size={12} fill="currentColor" /> Start Trip ({direction})
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleEndTrip}
-                  className="btn"
-                  style={{
-                    padding: '0.22rem 0.85rem',
-                    fontSize: '0.76rem',
-                    fontWeight: 800,
-                    backgroundColor: '#ef4444',
-                    borderColor: '#ef4444',
-                    color: '#ffffff',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.35rem',
-                    boxShadow: '0 0 10px rgba(239, 68, 68, 0.4)'
-                  }}
-                  title="End active trip and send POST /api/trip/end to Pi 3B Announcer"
-                >
-                  <Square size={12} fill="currentColor" /> End Trip
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
-                    document.activeElement.blur();
-                  }
-                  setIsCameraOpen(true);
-                }}
-                className="btn btn-primary"
-                style={{
-                  padding: '0.2rem 0.75rem',
-                  fontSize: '0.75rem',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.35rem',
-                  backgroundColor: '#0284c7',
-                  borderColor: '#0284c7',
-                  cursor: 'pointer',
-                  fontWeight: 700
-                }}
-                title="Open Camera QR Pass Scanner"
-              >
-                <Camera size={13} /> Scan Pass
-              </button>
-
-              <div
-                role="status"
-                aria-label="QR scanner status"
-                style={{
-                  padding: '.35rem .65rem',
-                  fontSize: '.75rem',
-                  fontWeight: 600,
-                  border: `1px solid ${isTripActive ? '#10b981' : '#f59e0b'}`,
-                  borderRadius: '6px',
-                  color: isTripActive ? '#34d399' : '#fef08a',
-                  backgroundColor: isTripActive ? 'rgba(16, 185, 129, 0.12)' : 'rgba(245, 158, 11, 0.12)',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '.35rem'
-                }}
-              >
-                {isTripActive ? '● QR Scanner Active' : '🔒 Scanner Locked (Start Trip First)'}
-              </div>
+            <div>
+              <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Conductor Name: </span>
+              <span style={{ color: 'var(--text-main)' }}>{dutySession.conductorName || '—'}</span>
+            </div>
+            <div>
+              <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Plate Number: </span>
+              <span style={{ color: 'var(--text-main)' }}>{dutySession.plateNumber || '—'}</span>
             </div>
           </div>
 
-          {/* Real-time Summary Counters: Available Priority, Regular, Total Onboard */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-            {/* Priority Seats Available */}
-            <div style={{ textAlign: 'center', padding: '0.3rem 0.6rem', backgroundColor: 'rgba(245, 158, 11, 0.1)', border: '1px solid #f59e0b', borderRadius: '6px', minWidth: '105px' }}>
-              <span style={{ fontSize: '0.68rem', color: '#fbbf24', fontWeight: 700, display: 'block' }}>PRIORITY SEATS</span>
-              <strong style={{ fontSize: '1.15rem', color: '#fef08a', fontVariantNumeric: 'tabular-nums' }}>
-                {availablePrioritySeats} <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>/ {prioritySeatCapacity}</span>
-              </strong>
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={() => handleDirectionToggle('Northbound')}
+              style={{
+                padding: '0.35rem 0.85rem',
+                fontSize: '0.88rem',
+                fontWeight: 700,
+                borderRadius: 'var(--radius-sm)',
+                border: direction === 'Northbound' ? '1px solid #2563eb' : '1px solid rgba(255, 255, 255, 0.2)',
+                backgroundColor: direction === 'Northbound' ? '#2563eb' : 'transparent',
+                color: '#ffffff',
+                cursor: 'pointer'
+              }}
+            >
+              Northbound ↑
+            </button>
+            <button
+              type="button"
+              onClick={() => handleDirectionToggle('Southbound')}
+              style={{
+                padding: '0.35rem 0.85rem',
+                fontSize: '0.88rem',
+                fontWeight: 700,
+                borderRadius: 'var(--radius-sm)',
+                border: direction === 'Southbound' ? '1px solid #2563eb' : '1px solid rgba(255, 255, 255, 0.2)',
+                backgroundColor: direction === 'Southbound' ? '#2563eb' : 'transparent',
+                color: '#ffffff',
+                cursor: 'pointer'
+              }}
+            >
+              Southbound ↓
+            </button>
+            {!isTripActive ? (
+              <button
+                type="button"
+                onClick={() => handleStartTrip(false)}
+                style={{
+                  padding: '0.35rem 1rem',
+                  fontSize: '0.88rem',
+                  fontWeight: 700,
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid #10b981',
+                  backgroundColor: '#10b981',
+                  color: '#ffffff',
+                  cursor: 'pointer'
+                }}
+              >
+                ► Start Trip ({direction})
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleEndTrip}
+                style={{
+                  padding: '0.35rem 1rem',
+                  fontSize: '0.88rem',
+                  fontWeight: 700,
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid #ef4444',
+                  backgroundColor: '#ef4444',
+                  color: '#ffffff',
+                  cursor: 'pointer'
+                }}
+              >
+                End Trip
+              </button>
+            )}
+          </div>
+        </div>
 
-            {/* Regular Seats Available */}
-            <div style={{ textAlign: 'center', padding: '0.3rem 0.6rem', backgroundColor: 'rgba(6, 182, 212, 0.1)', border: '1px solid #06b6d4', borderRadius: '6px', minWidth: '105px' }}>
-              <span style={{ fontSize: '0.68rem', color: '#38bdf8', fontWeight: 700, display: 'block' }}>REGULAR SEATS</span>
-              <strong style={{ fontSize: '1.15rem', color: '#e0f2fe', fontVariantNumeric: 'tabular-nums' }}>
-                {availableRegularSeats} <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>/ {regularSeatCapacity}</span>
-              </strong>
-            </div>
+        {/* Center: Live Digital Clock & Date */}
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '2.1rem', fontWeight: 800, color: 'var(--text-main)', letterSpacing: '0.02em', lineHeight: 1.1 }}>
+            {timeFormatted}
+          </div>
+          <div style={{ fontSize: '0.95rem', fontWeight: 600, color: '#06b6d4', marginTop: '0.25rem' }}>
+            {dateFormatted}
+          </div>
+        </div>
 
-            {/* Total Onboard */}
-            <div style={{ textAlign: 'center', minWidth: '90px' }}>
-              <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block' }}>ONBOARD</span>
-              <strong style={{ fontSize: '1.25rem', color: '#10b981', fontVariantNumeric: 'tabular-nums' }}>
-                {totalOnboard} <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>/ {busCapacity}</span>
-              </strong>
+        {/* Right: Onboard Count & Available Seats Breakdown */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1.75rem' }}>
+          <div style={{ textAlign: 'left' }}>
+            <div style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--text-main)', letterSpacing: '0.04em' }}>
+              ONBOARD
             </div>
-
-            {/* Current Stop */}
-            <div style={{ textAlign: 'center', minWidth: '95px' }}>
-              <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block' }}>CURRENT STOP</span>
-              <strong style={{ fontSize: '0.95rem', color: '#06b6d4', fontVariantNumeric: 'tabular-nums' }}>
-                Stop {currentStopIndex + 1}/{stopsList.length}
-              </strong>
-            </div>
-
-            {/* Next Stop Proximity Distance */}
-            <div style={{
-              textAlign: 'center',
-              padding: '0.3rem 0.6rem',
-              backgroundColor: tripPhase === 'approaching' ? 'rgba(6, 182, 212, 0.2)' : 'rgba(15, 23, 42, 0.6)',
-              border: '1px solid',
-              borderColor: tripPhase === 'approaching' ? '#38bdf8' : 'rgba(255, 255, 255, 0.1)',
-              borderRadius: '6px',
-              minWidth: '120px'
-            }}>
-              <span style={{ fontSize: '0.68rem', color: tripPhase === 'approaching' ? '#38bdf8' : 'var(--text-muted)', fontWeight: 700, display: 'block' }}>
-                {tripPhase === 'approaching' ? 'APPROACHING NEXT' : 'NEXT STOP DIST'}
+            <div style={{ display: 'flex', alignItems: 'baseline', lineHeight: 1 }}>
+              <span style={{ fontSize: '3.6rem', fontWeight: 800, color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums' }}>
+                {totalOnboard}
               </span>
-              <strong style={{
-                fontSize: '1.05rem',
-                color: distanceToHeading != null
-                  ? (distanceToHeading <= 40 ? '#10b981' : (distanceToHeading <= 140 ? '#38bdf8' : '#e0f2fe'))
-                  : '#94a3b8',
-                fontVariantNumeric: 'tabular-nums'
-              }}>
-                {distanceToHeading != null ? `${distanceToHeading} m` : (deviceGps.active ? 'At Terminal' : '—')}
-              </strong>
+              <span style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-main)', marginLeft: '0.15rem' }}>
+                /{busCapacity}
+              </span>
             </div>
+          </div>
 
-            {/* Alighting at Next Stop */}
-            <div style={{ textAlign: 'center', minWidth: '110px' }}>
-              <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block' }}>ALIGHTING NEXT</span>
-              <strong style={{ fontSize: '1.1rem', color: passengersAlightingAt(stopsList[currentStopIndex + 1]?.name) ? '#ef4444' : '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>
-                {passengersAlightingAt(stopsList[currentStopIndex + 1]?.name) || '—'}{passengersAlightingAt(stopsList[currentStopIndex + 1]?.name) ? ' pax' : ''}
-              </strong>
+          <div style={{ textAlign: 'left' }}>
+            <div style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--text-main)', letterSpacing: '0.04em', marginBottom: '0.35rem' }}>
+              AVAILABLE SEATS
             </div>
-
-            {/* Live Clock */}
-            <div style={{
-              textAlign: 'right',
-              borderLeft: '1px solid var(--border-color)',
-              paddingLeft: '0.85rem',
-              minWidth: '130px'
-            }}>
-              <div style={{ fontSize: '1.15rem', fontWeight: 800, color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums' }}>
-                {timeFormatted}
-              </div>
-              <div style={{ fontSize: '0.72rem', color: '#06b6d4', fontVariantNumeric: 'tabular-nums' }}>
-                {dateFormatted}
-              </div>
+            <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-main)' }}>
+              PRIORITY: {availablePrioritySeats}/{prioritySeatCapacity}
+            </div>
+            <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-main)' }}>
+              NON-PRIORITY: {availableRegularSeats}/{regularSeatCapacity}
             </div>
           </div>
         </div>
       </div>
 
       {statusMessage && (
-        <div className="alert alert-success" style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', margin: 0, flexShrink: 0 }}>
+        <div
+          className={`alert ${statusType === 'error' ? 'alert-danger' : 'alert-success'}`}
+          style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', margin: 0, flexShrink: 0 }}
+        >
           {statusMessage}
         </div>
       )}
 
       {/* MANUAL PASSENGER REGISTRATION & STOP ARRIVAL MODAL */}
       {showManualRegistration && (
-        <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.78)', display: 'grid', placeItems: 'center', zIndex: 1500, padding: '1rem' }}>
-          <div className="card" style={{ width: 'min(520px, 100%)', padding: '1.5rem', border: currentStopIndex === stopsList.length - 1 ? '2px solid #f59e0b' : '2px solid #06b6d4', boxShadow: '0 20px 40px rgba(0,0,0,0.6)', maxHeight: '90vh', overflowY: 'auto' }}>
+        <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'grid', placeItems: 'center', zIndex: 1500, padding: '1rem' }}>
+          <div className="card" style={{ width: 'min(520px, 100%)', padding: '1.5rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', maxHeight: '90vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.65rem' }}>
               <span className={`badge ${currentStopIndex === stopsList.length - 1 ? 'badge-warning' : 'badge-success'}`} style={{ fontSize: '0.75rem', fontWeight: 800 }}>
-                {currentStopIndex === stopsList.length - 1 ? '🏁 TARGET DESTINATION REACHED (STOP 15 OF 15)' : `📍 BUS AT STOP ${currentStopIndex + 1} OF 15`}
+                {currentStopIndex === stopsList.length - 1 ? 'TARGET DESTINATION REACHED (STOP 15 OF 15)' : `BUS AT STOP ${currentStopIndex + 1} OF 15`}
               </span>
-              <button type="button" onClick={() => setShowManualRegistration(false)} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '1.25rem', padding: '0 0.25rem' }}>×</button>
+              <button type="button" onClick={() => setShowManualRegistration(false)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1.25rem', padding: '0 0.25rem' }}>×</button>
             </div>
             <h2 style={{ fontSize: '1.25rem', marginTop: 0, marginBottom: '0.25rem', color: 'var(--text-main)' }}>
-              {currentStopIndex === stopsList.length - 1 ? '🏁 Final Terminal Arrival' : `Stop ${currentStopIndex + 1}: Passenger Registry`}
+              {currentStopIndex === stopsList.length - 1 ? 'Final Terminal Arrival' : `Stop ${currentStopIndex + 1}: Passenger Registry`}
             </h2>
-            <p style={{ color: '#94a3b8', fontSize: '0.85rem', marginBottom: '1rem', lineHeight: '1.4' }}>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1rem', lineHeight: '1.4' }}>
               {currentStopIndex === stopsList.length - 1 ? (
-                <span style={{ color: '#fbbf24', fontWeight: 700 }}>Bus has arrived at target destination terminal: <strong>{currentStop.name}</strong></span>
+                <span style={{ color: 'var(--color-warning)', fontWeight: 700 }}>Bus has arrived at target destination terminal: <strong>{currentStop.name}</strong></span>
               ) : (
-                <span>Bus at Stop {currentStopIndex + 1}: <strong style={{ color: '#38bdf8' }}>{currentStop.name}</strong></span>
+                <span>Bus at Stop {currentStopIndex + 1}: <strong style={{ color: 'var(--color-accent)' }}>{currentStop.name}</strong></span>
               )}
             </p>
 
             {/* ALIGHTING PASSENGERS AT THIS STOP */}
             {(passengersAlightingAt(currentStop.name) > 0 || (currentStopIndex === stopsList.length - 1 && totalOnboard > 0)) && (
-              <div style={{ padding: '.75rem .9rem', marginBottom: '1rem', borderRadius: '8px', backgroundColor: 'rgba(239, 68, 68, .12)', border: '1px solid #ef4444' }}>
+              <div style={{ padding: '.75rem .9rem', marginBottom: '1rem', borderRadius: 'var(--radius-sm)', backgroundColor: 'rgba(239, 68, 68, .12)', border: '1px solid #ef4444' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.5rem' }}>
                   <span style={{ color: '#f87171', fontWeight: 800, fontSize: '.9rem' }}>
-                    ↓ Alighting at this Stop: {currentStopIndex === stopsList.length - 1 ? totalOnboard : passengersAlightingAt(currentStop.name)} pax
+                    Alighting at this Stop: {currentStopIndex === stopsList.length - 1 ? totalOnboard : passengersAlightingAt(currentStop.name)} pax
                   </span>
                 </div>
                 <button
                   type="button"
                   className="btn"
                   onClick={currentStopIndex === stopsList.length - 1 ? handleAlightAllRemainingPassengers : handleAlightCurrentStopPassengers}
-                  style={{ width: '100%', backgroundColor: '#ef4444', color: '#ffffff', fontWeight: 700, padding: '0.55rem', borderRadius: '6px', border: 'none', cursor: 'pointer' }}
+                  style={{ width: '100%', backgroundColor: '#ef4444', color: '#ffffff', fontWeight: 700, padding: '0.55rem', borderRadius: 'var(--radius-sm)', border: 'none', cursor: 'pointer' }}
                 >
-                  ✓ Confirm Alighting ({currentStopIndex === stopsList.length - 1 ? totalOnboard : passengersAlightingAt(currentStop.name)} pax)
+                  Confirm Alighting ({currentStopIndex === stopsList.length - 1 ? totalOnboard : passengersAlightingAt(currentStop.name)} pax)
                 </button>
               </div>
             )}
 
             {passengersCompletedAlightedAt(currentStop.name) > 0 && (
-              <div style={{ padding: '.45rem .75rem', marginBottom: '.75rem', borderRadius: '6px', backgroundColor: 'rgba(148, 163, 184, .1)', border: '1px solid #64748b', color: '#94a3b8', fontSize: '.78rem' }}>
-                ✓ {passengersCompletedAlightedAt(currentStop.name)} passenger(s) have already alighted at this stop.
+              <div style={{ padding: '.45rem .75rem', marginBottom: '.75rem', borderRadius: 'var(--radius-sm)', backgroundColor: 'rgba(148, 163, 184, .1)', border: '1px solid #64748b', color: 'var(--text-muted)', fontSize: '.78rem' }}>
+                {passengersCompletedAlightedAt(currentStop.name)} passenger(s) have already alighted at this stop.
               </div>
             )}
 
             {/* BOARDING SECTION (NOT TERMINAL STOP) */}
             {currentStopIndex < stopsList.length - 1 ? (
               <form onSubmit={handleManualRegistration}>
-                <div style={{ padding: '.65rem .8rem', marginBottom: '.75rem', borderRadius: '8px', backgroundColor: 'rgba(6, 182, 212, .12)', border: '1px solid #0891b2', color: '#67e8f9', fontWeight: 800, display: 'flex', justifyContent: 'space-between' }}>
+                <div style={{ padding: '.65rem .8rem', marginBottom: '.75rem', borderRadius: 'var(--radius-sm)', backgroundColor: 'var(--bg-subtle)', border: '1px solid var(--border-color)', color: 'var(--text-main)', fontWeight: 800, display: 'flex', justifyContent: 'space-between' }}>
                   <span>Already boarded at this stop:</span>
                   <span style={{ fontSize: '1rem' }}>{passengersBoardedAt(currentStop.name)} pax</span>
                 </div>
@@ -1863,8 +1726,8 @@ export function RouteInformationPage() {
                       id="manual-passenger-count"
                       type="number"
                       min="1"
-                      max="20"
-                      className="form-control"
+                      max="50"
+                      className="form-input"
                       value={manualPassengerCount}
                       onChange={(e) => setManualPassengerCount(Math.max(1, parseInt(e.target.value, 10) || 1))}
                       style={{ textAlign: 'center', fontWeight: 700 }}
@@ -1895,7 +1758,7 @@ export function RouteInformationPage() {
                   <button
                     type="submit"
                     className="btn btn-primary"
-                    style={{ flex: 1, backgroundColor: '#06b6d4', borderColor: '#06b6d4', fontWeight: 700 }}
+                    style={{ flex: 1, fontWeight: 700 }}
                     disabled={manualRegistrationBusy || !isTripActive || !manualDestination}
                   >
                     {manualRegistrationBusy ? 'Registering…' : `Confirm & Board ${manualPassengerCount} Passenger${manualPassengerCount > 1 ? 's' : ''}`}
@@ -1904,7 +1767,7 @@ export function RouteInformationPage() {
               </form>
             ) : (
               <div style={{ marginTop: '1rem', textAlign: 'center' }}>
-                <p style={{ color: '#fbbf24', fontSize: '.9rem' }}>This is the final stop of the route. No new boardings allowed.</p>
+                <p style={{ color: 'var(--color-warning)', fontSize: '.9rem' }}>This is the final stop of the route. No new boardings allowed.</p>
                 <button type="button" className="btn btn-secondary" onClick={() => setShowManualRegistration(false)} style={{ width: '100%', marginTop: '.5rem' }}>
                   Close
                 </button>
@@ -1916,53 +1779,14 @@ export function RouteInformationPage() {
 
       {/* MAIN ROUTE STOP SEQUENCE SECTION */}
       <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '0.75rem', overflow: 'visible', minHeight: '0' }}>
-        {/* Sequence Title & Controls */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border-color)', flexShrink: 0, flexWrap: 'wrap', gap: '.5rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
-            <MapPin size={20} color="#06b6d4" />
-            <h2 style={{ fontSize: '1.15rem', margin: 0 }}>
-              Route Stop Sequence ({direction} View: {direction === 'Northbound' ? 'QC Hall to Gen. Luis' : 'Gen. Luis to QC Hall'})
-            </h2>
-            <span style={{
-              fontSize: '0.72rem',
-              fontWeight: 700,
-              padding: '0.15rem 0.55rem',
-              borderRadius: '9999px',
-              backgroundColor: 'rgba(6, 182, 212, 0.12)',
-              color: '#06b6d4',
-              border: '1px solid rgba(6, 182, 212, 0.35)',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '0.25rem'
-            }} title="Boarding numbers calculated by Random Forest Regressor trained on qcbus_data_modeling.csv">
-              <Sparkles size={11} /> ML Boarding Guidance Active
-            </span>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            {isTripActive ? (
-              <button
-                type="button"
-                onClick={handlePauseTrip}
-                className="btn btn-secondary"
-                style={{ padding: '0.3rem 0.75rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
-              >
-                <Pause size={14} /> Pause Trip
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => handleStartAnotherTrip(false)}
-                className="btn btn-primary"
-                style={{ padding: '0.3rem 0.75rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
-              >
-                <Play size={14} /> Start Trip
-              </button>
-            )}
-          </div>
+        {/* Sequence Title (Removed Image 2 Elements) */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border-color)', flexShrink: 0 }}>
+          <h2 style={{ fontSize: '1.15rem', margin: 0 }}>
+            Route Stop Sequence ({direction} View: {direction === 'Northbound' ? 'QC Hall to Gen. Luis' : 'Gen. Luis to QC Hall'})
+          </h2>
         </div>
 
-        {/* 15 STOPS DENSE GRID WITH BOARDED & ALIGHTING NUMBERS */}
+        {/* 15 STOPS DENSE GRID - ONLY CURRENT STOP IN GREEN, ALREADY DONE IN GRAY */}
         <div style={{
           flex: 1,
           display: 'grid',
@@ -1974,7 +1798,6 @@ export function RouteInformationPage() {
         }}>
           {stopsList.map((s, idx) => {
             const isCurrent = idx === currentStopIndex;
-            const isHeading = idx === headingStopIndex && idx !== currentStopIndex;
             const isPassed = idx < currentStopIndex;
             const stopDist = stopDistances[idx] ?? stopDistances[s.id];
             const boardedCount = passengersBoardedAt(s.name);
@@ -1989,59 +1812,48 @@ export function RouteInformationPage() {
                 title={`Click to set Bus at Stop ${idx + 1} and open manual passenger registration`}
                 style={{
                   padding: '0.55rem',
-                  borderRadius: '8px',
+                  borderRadius: 'var(--radius-sm)',
                   cursor: 'pointer',
                   border: isCurrent
-                    ? '3px solid #10b981'
-                    : (isHeading
-                      ? '2px solid #06b6d4'
-                      : (isPassed ? '1px solid rgba(255, 255, 255, 0.05)' : '1px solid var(--border-color)')),
+                    ? '2px solid #10b981'
+                    : (isPassed ? '1px solid #475569' : '1px solid var(--border-color)'),
                   backgroundColor: isCurrent
-                    ? 'rgba(16, 185, 129, 0.25)'
-                    : (isHeading
-                      ? 'rgba(6, 182, 212, 0.18)'
-                      : (isPassed ? 'rgba(15, 23, 42, 0.55)' : 'var(--bg-card)')),
-                  opacity: isPassed ? 0.65 : 1,
-                  filter: isPassed ? 'grayscale(0.35)' : 'none',
-                  transition: 'all 0.25s ease',
+                    ? 'rgba(16, 185, 129, 0.12)'
+                    : (isPassed ? 'rgba(71, 85, 105, 0.15)' : 'var(--bg-card)'),
+                  opacity: isPassed ? 0.75 : 1,
                   display: 'flex',
                   flexDirection: 'column',
-                  justifyContent: 'space-between',
-                  boxShadow: isCurrent
-                    ? '0 0 14px rgba(16, 185, 129, 0.4)'
-                    : (isHeading ? '0 0 10px rgba(6, 182, 212, 0.35)' : 'none')
+                  justifyContent: 'space-between'
                 }}
               >
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
                     <span style={{
                       fontSize: '0.72rem',
-                      fontWeight: 800,
-                      backgroundColor: isCurrent ? '#10b981' : (isHeading ? '#06b6d4' : (isPassed ? '#475569' : '#0284c7')),
-                      color: '#ffffff',
+                      fontWeight: 700,
+                      backgroundColor: isCurrent ? '#10b981' : (isPassed ? '#475569' : 'var(--bg-subtle)'),
+                      color: isCurrent ? '#ffffff' : (isPassed ? '#cbd5e1' : 'var(--text-main)'),
+                      border: isCurrent ? '1px solid #10b981' : (isPassed ? '1px solid #475569' : '1px solid var(--border-color)'),
                       padding: '0.15rem 0.45rem',
-                      borderRadius: '4px'
+                      borderRadius: 'var(--radius-sm)'
                     }}>
-                      {isCurrent ? `STOP ${idx + 1} · CURRENT` : (isHeading ? `STOP ${idx + 1} · NEXT ➔` : `STOP ${idx + 1}`)}
+                      {isCurrent ? `STOP ${idx + 1} · CURRENT` : (isPassed ? `STOP ${idx + 1} · DONE` : `STOP ${idx + 1}`)}
                     </span>
                     {stopDist != null && (
                       <span style={{
                         fontSize: '0.68rem',
-                        fontWeight: 700,
-                        color: isCurrent ? '#34d399' : (isHeading ? '#38bdf8' : (isPassed ? '#64748b' : '#94a3b8')),
-                        backgroundColor: isCurrent ? 'rgba(16, 185, 129, 0.18)' : (isHeading ? 'rgba(6, 182, 212, 0.18)' : 'rgba(255, 255, 255, 0.04)'),
-                        padding: '0.12rem 0.38rem',
-                        borderRadius: '4px',
-                        border: isHeading ? '1px solid rgba(6, 182, 212, 0.4)' : (isCurrent ? '1px solid rgba(16, 185, 129, 0.4)' : 'none')
+                        fontWeight: 600,
+                        color: isCurrent ? '#10b981' : (isPassed ? '#94a3b8' : 'var(--text-muted)'),
+                        padding: '0.12rem 0.38rem'
                       }}>
-                        {isCurrent ? '✓ At Stop' : (isHeading ? `➔ ${stopDist}m` : (isPassed ? 'Passed' : `${stopDist}m`))}
+                        {isCurrent ? 'At Stop' : (isPassed ? 'Passed' : `${stopDist}m`)}
                       </span>
                     )}
                   </div>
                   <div style={{
                     fontWeight: 700,
                     fontSize: '0.85rem',
-                    color: isCurrent ? '#34d399' : (isHeading ? '#38bdf8' : (isPassed ? '#94a3b8' : 'var(--text-main)')),
+                    color: isCurrent ? '#10b981' : (isPassed ? '#94a3b8' : 'var(--text-main)'),
                     lineHeight: 1.35,
                     display: '-webkit-box',
                     WebkitLineClamp: 2,
@@ -2053,51 +1865,47 @@ export function RouteInformationPage() {
                 </div>
 
                 <div>
-                  {/* BOARDED & ALIGHTING BADGES */}
+                  {/* BOARDED & ALIGHTING COUNTERS */}
                   <div style={{ display: 'flex', gap: '.3rem', marginTop: '.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
                     {boardedCount > 0 && (
-                      <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(16,185,129,.2)', border: '1px solid #10b981', color: '#34d399', fontSize: '.68rem', fontWeight: 700 }} title={`${boardedCount} boarded at this stop`}>
-                        ↑ {boardedCount} boarded
+                      <span style={{ padding: '.12rem .35rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,.15)', border: '1px solid #10b981', color: '#10b981', fontSize: '.68rem', fontWeight: 700 }}>
+                        Boarded: {boardedCount}
                       </span>
                     )}
                     {alightingCount > 0 && (
-                      <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(239,68,68,.18)', border: '1px solid #ef4444', color: '#f87171', fontSize: '.68rem', fontWeight: 800 }} title={`${alightingCount} passengers to alight here`}>
-                        ↓ {alightingCount} alighting
+                      <span style={{ padding: '.12rem .35rem', borderRadius: 'var(--radius-sm)', background: 'rgba(239,68,68,.15)', border: '1px solid #ef4444', color: '#ef4444', fontSize: '.68rem', fontWeight: 700 }}>
+                        Alighting: {alightingCount}
                       </span>
                     )}
                     {completedAlightedCount > 0 && (
-                      <span style={{ padding: '.15rem .35rem', borderRadius: '4px', background: 'rgba(148,163,184,.15)', border: '1px solid #64748b', color: '#94a3b8', fontSize: '.68rem', fontWeight: 600 }} title={`${completedAlightedCount} passengers already alighted here`}>
-                        ✓ {completedAlightedCount} alighted
+                      <span style={{ padding: '.12rem .35rem', borderRadius: 'var(--radius-sm)', background: 'rgba(148,163,184,.15)', border: '1px solid #64748b', color: '#94a3b8', fontSize: '.68rem', fontWeight: 600 }}>
+                        Alighted: {completedAlightedCount}
                       </span>
                     )}
                     {boardedCount === 0 && alightingCount === 0 && completedAlightedCount === 0 && (
-                      <span style={{ fontSize: '.65rem', color: '#64748b' }}>0 pax</span>
+                      <span style={{ fontSize: '.65rem', color: 'var(--text-dim)' }}>0 pax</span>
                     )}
                   </div>
 
-                  {/* RECOMMENDED PASSENGERS TO BE BOARDED (Random Forest Model) */}
+                  {/* RECOMMENDED PASSENGERS TO BE BOARDED */}
                   <div
                     style={{
                       marginTop: '0.45rem',
                       paddingTop: '0.35rem',
-                      borderTop: '1px dashed var(--border-color)',
+                      borderTop: '1px solid var(--border-color)',
                       display: 'flex',
                       justifyContent: 'space-between',
                       alignItems: 'center'
                     }}
-                    title={`Random Forest Recommended Boarding for ${s.name} (${direction}, ${recBoarding?.currentPeriodLabel || 'Nominal'}): ${recBoarding?.currentPeriodRecommended ?? recBoarding?.overallRecommended} pax (Operational Range: ${recBoarding?.recommendedRange})`}
                   >
-                    <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: '0.2rem', fontWeight: 600 }}>
-                      <Users size={11} color="#06b6d4" /> Rec. Board:
+                    <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                      Rec. Board:
                     </span>
                     <span style={{
                       fontSize: '0.74rem',
-                      fontWeight: 800,
-                      color: recBoarding?.isTerminal ? '#94a3b8' : '#38bdf8',
-                      backgroundColor: recBoarding?.isTerminal ? 'rgba(148, 163, 184, 0.12)' : 'rgba(6, 182, 212, 0.16)',
-                      border: recBoarding?.isTerminal ? '1px solid #475569' : '1px solid #06b6d4',
-                      padding: '0.1rem 0.4rem',
-                      borderRadius: '4px'
+                      fontWeight: 700,
+                      color: 'var(--text-main)',
+                      padding: '0.1rem 0.35rem'
                     }}>
                       {recBoarding?.isTerminal ? '0 (Terminus)' : `${recBoarding?.currentPeriodRecommended ?? recBoarding?.overallRecommended} pax`}
                     </span>
@@ -2108,82 +1916,45 @@ export function RouteInformationPage() {
           })}
         </div>
 
-        {/* BOTTOM QUICK CONTROLS */}
+        {/* BOTTOM QUICK CONTROLS - Start Trip button removed */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', paddingTop: '0.65rem', marginTop: '0.5rem', borderTop: '1px solid var(--border-color)', flexShrink: 0, flexWrap: 'wrap' }}>
           <button
             type="button"
             onClick={() => triggerArrivalAtStop(currentStopIndex)}
             className="btn btn-secondary"
-            style={{ padding: '0.45rem 0.85rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.35rem', backgroundColor: 'rgba(6, 182, 212, 0.15)', border: '1px solid #06b6d4', color: '#38bdf8' }}
+            style={{ padding: '0.45rem 0.85rem', fontSize: '0.85rem' }}
           >
-            <Users size={16} /> Register Passengers (Stop {currentStopIndex + 1})
+            Register Passengers (Stop {currentStopIndex + 1})
           </button>
 
-          {!isTripActive ? (
+          <button
+            type="button"
+            onClick={() => {
+              if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+                document.activeElement.blur();
+              }
+              setIsCameraOpen(true);
+            }}
+            className="btn btn-secondary"
+            style={{ padding: '0.45rem 0.85rem', fontSize: '0.85rem' }}
+          >
+            Scan Pass
+          </button>
+
+          {isTripActive && (
             <button
               type="button"
-              onClick={() => handleStartTrip(false)}
-              className="btn btn-primary"
+              onClick={handleEndTrip}
+              className="btn btn-danger"
               style={{
                 justifyContent: 'center',
                 padding: '0.45rem 1.15rem',
                 fontSize: '0.88rem',
-                fontWeight: 800,
-                backgroundColor: '#10b981',
-                borderColor: '#10b981',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.4rem',
-                boxShadow: '0 0 12px rgba(16, 185, 129, 0.35)'
+                fontWeight: 700
               }}
-              title={`Start ${direction} trip and send command to Pi 3B`}
             >
-              <Play size={16} fill="currentColor" /> Start Trip ({direction})
+              End Trip
             </button>
-          ) : (
-            <>
-              <button
-                type="button"
-                onClick={handleEndTrip}
-                className="btn"
-                style={{
-                  justifyContent: 'center',
-                  padding: '0.45rem 1.15rem',
-                  fontSize: '0.88rem',
-                  fontWeight: 800,
-                  backgroundColor: '#ef4444',
-                  borderColor: '#ef4444',
-                  color: '#ffffff',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.4rem',
-                  boxShadow: '0 0 12px rgba(239, 68, 68, 0.35)'
-                }}
-                title="End active trip and send command to Pi 3B"
-              >
-                <Square size={16} fill="currentColor" /> End Trip
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleStartTrip(true)}
-                className="btn btn-primary"
-                style={{
-                  justifyContent: 'center',
-                  padding: '0.45rem 1rem',
-                  fontSize: '0.88rem',
-                  fontWeight: 800,
-                  backgroundColor: '#0284c7',
-                  borderColor: '#0284c7',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.4rem'
-                }}
-                title="Begin next trip loop"
-              >
-                <RotateCcw size={16} /> Start Another Trip
-              </button>
-            </>
           )}
         </div>
       </div>

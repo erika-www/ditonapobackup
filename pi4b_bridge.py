@@ -58,7 +58,7 @@ except ImportError:
 
 # Optional pynmea2 library
 try:
-    import pynmea2
+    import pynmea2  # type: ignore
     HAS_PYNMEA2 = True
 except ImportError:
     HAS_PYNMEA2 = False

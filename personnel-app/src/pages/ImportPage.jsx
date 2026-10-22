@@ -1,10 +1,5 @@
-/**
- * ImportPage Component (React / JSX)
- * Administrative portal page for uploading CSV/JSON datasets with dry-run schema validation.
- */
 import React, { useState } from 'react';
 import { previewImport, commitImport } from '../services/api';
-import { Upload, CheckCircle2, AlertTriangle, Database } from 'lucide-react';
 
 export function ImportPage() {
   const [entityType, setEntityType] = useState('routes');
@@ -69,19 +64,19 @@ export function ImportPage() {
       </div>
 
       {commitResult && (
-        <div className="alert alert-success" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
-          <CheckCircle2 size={20} /> {commitResult.message}
+        <div className="alert alert-success" style={{ marginBottom: '1.5rem', borderRadius: '4px' }}>
+          {commitResult.message}
         </div>
       )}
 
       {error && (
-        <div className="alert alert-danger" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
-          <AlertTriangle size={20} /> {error}
+        <div className="alert alert-danger" style={{ marginBottom: '1.5rem', borderRadius: '4px' }}>
+          {error}
         </div>
       )}
 
       {/* Upload Dropzone */}
-      <div className="stat-card" style={{ marginBottom: '2rem' }}>
+      <div className="stat-card" style={{ marginBottom: '2rem', borderRadius: '6px' }}>
         <h2 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: '1rem' }}>Step 1: Upload Dataset & Select Entity</h2>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '1.5rem' }}>
@@ -98,7 +93,7 @@ export function ImportPage() {
               </select>
             </div>
 
-            <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '1rem', background: 'var(--bg-subtle)', padding: '0.85rem', borderRadius: 'var(--radius-sm)' }}>
+            <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '1rem', background: 'var(--bg-subtle)', padding: '0.85rem', borderRadius: '4px' }}>
               <strong>Import Safety Protocol:</strong> All uploads execute a dry-run preview first. Rows with duplicate primary keys or invalid column data are reported before committing to PostgreSQL.
             </div>
           </div>
@@ -106,7 +101,6 @@ export function ImportPage() {
           <div>
             <label className="dropzone" style={{ display: 'block' }}>
               <input type="file" accept=".csv,.json" onChange={handleFileChange} style={{ display: 'none' }} />
-              <Upload size={36} color="#06b6d4" style={{ margin: '0 auto 0.75rem' }} />
               <div style={{ fontWeight: 700, fontSize: '1rem', color: '#f8fafc' }}>
                 {file ? file.name : 'Click to select or drag CSV / JSON file'}
               </div>
@@ -132,7 +126,7 @@ export function ImportPage() {
 
       {/* Validation Preview Report */}
       {preview && (
-        <div className="stat-card">
+        <div className="stat-card" style={{ borderRadius: '6px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
             <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Step 2: Validation Preview Report</h2>
 
@@ -143,7 +137,7 @@ export function ImportPage() {
               disabled={committing || preview.invalid_rows_count > 0}
               style={{ background: preview.invalid_rows_count > 0 ? '#64748b' : 'var(--color-emerald)' }}
             >
-              <Database size={16} /> {committing ? 'Committing Data...' : `Commit ${preview.valid_rows_count} Rows to PostgreSQL`}
+              {committing ? 'Committing Data...' : `Commit ${preview.valid_rows_count} Rows to PostgreSQL`}
             </button>
           </div>
 

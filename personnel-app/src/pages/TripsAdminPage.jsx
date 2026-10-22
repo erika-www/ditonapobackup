@@ -1,10 +1,5 @@
-/**
- * TripsAdminPage Component (React / JSX)
- * Administrative page for monitoring and updating real-time bus trip operation statuses.
- */
 import React, { useEffect, useState } from 'react';
 import { getAdminTrips, updateTrip, deleteTrip } from '../services/api';
-import { Trash2, Edit2, X } from 'lucide-react';
 
 export function TripsAdminPage() {
   const [trips, setTrips] = useState([]);
@@ -92,10 +87,10 @@ export function TripsAdminPage() {
                   <td style={{ textAlign: 'right' }}>
                     <div style={{ display: 'flex', gap: '0.35rem', justifyContent: 'flex-end' }}>
                       <button type="button" onClick={() => { setEditingTrip(t); setSelectedStatus(t.status); }} className="btn btn-secondary" style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}>
-                        <Edit2 size={14} /> Update Status
+                        Update Status
                       </button>
                       <button type="button" onClick={() => handleDelete(t.id)} className="btn btn-danger" style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}>
-                        <Trash2 size={14} /> Delete
+                        Delete
                       </button>
                     </div>
                   </td>
@@ -108,10 +103,10 @@ export function TripsAdminPage() {
 
       {editingTrip && (
         <div className="modal-overlay">
-          <div className="modal-content">
+          <div className="modal-content" style={{ borderRadius: '6px' }}>
             <div className="modal-header">
               <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Update Trip #{editingTrip.id} Status</h2>
-              <button type="button" onClick={() => setEditingTrip(null)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><X size={20} color="#94a3b8" /></button>
+              <button type="button" onClick={() => setEditingTrip(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontWeight: 'bold' }}>×</button>
             </div>
 
             <div className="form-group">
