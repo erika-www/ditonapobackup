@@ -1,16 +1,3 @@
-"""
-Quezon City Bus Transit - Random Forest Machine Learning Script
-Performs Random Forest Modeling for:
-1. Queue Prediction per stop across 54 time intervals:
-   - Earliest time (05:00) to 09:00: every 15 mins
-   - 09:00 to 16:00: every 30 mins
-   - 16:00 to latest time (22:00): every 15 mins
-2. Recommended Number of Passengers to be Boarded at each stop along Route 4:
-   - Tailored by direction (Northbound vs Southbound)
-   - Tailored by time period (Morning Peak, Midday, Evening Peak, Night)
-   - Accounts for seating capacity and downstream passenger flow
-"""
-
 import os
 import json
 import numpy as np
@@ -19,7 +6,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-# Canonical 15 Stops for Route 4
+
 ROUTE4_CANONICAL_STOPS = [
     {"stopNumber": 1, "name": "Quezon City Hall – NHA Interchange", "csvName": "QC Hall (NHA) Interchange", "short": "QC Hall"},
     {"stopNumber": 2, "name": "North Avenue – Veterans Hospital / Vertis North", "csvName": "North Ave. - Veterans Memorial Medical Center (VMMC) - Vertis North", "short": "North Ave / VMMC"},
@@ -126,20 +113,15 @@ def main():
     slots = define_time_slots()
     print(f"Defined {len(slots)} operational time intervals.")
 
-    # -------------------------------------------------------------
     # MODEL 1: Queue Prediction per Stop and Time Interval
-    # -------------------------------------------------------------
     print("\n" + "="*50)
     print("TRAINING MODEL 1: Stop Queue Random Forest Regressor")
     print("="*50)
 
-    # Assign slot to each record
     df["slot"] = df["mins"].apply(lambda m: map_to_slot(m, slots))
     df_slotted = df.dropna(subset=["slot"]).copy()
     df_slotted["slot_id"] = df_slotted["slot"].apply(lambda s: s["slotId"])
 
-    # Build slot aggregated training dataset:
-    # For every (stop, slot_id, date)
     slot_agg = df_slotted.groupby(["canonical_name", "stop_number", "slot_id", "date", "day_of_week", "is_weekend"]).agg(
         total_boarded=("passenger loaded", "sum"),
         bus_count=("busId", "nunique"),
@@ -147,7 +129,6 @@ def main():
         max_boarded=("passenger loaded", "max")
     ).reset_index()
 
-    # Add slot metadata features
     slot_meta_dict = {s["slotId"]: s for s in slots}
     slot_agg["start_min"] = slot_agg["slot_id"].apply(lambda sid: slot_meta_dict[sid]["startMin"])
     slot_agg["duration"] = slot_agg["slot_id"].apply(lambda sid: slot_meta_dict[sid]["duration"])
@@ -157,13 +138,12 @@ def main():
     slot_agg["is_evening_peak"] = (slot_agg["start_min"].between(960, 1200)).astype(int)
     slot_agg["is_midday"] = (slot_agg["start_min"].between(540, 960)).astype(int)
 
-    # Features for Queue RF:
     feature_cols_m1 = [
         "stop_number", "slot_id", "start_min", "duration", "hour",
         "day_of_week", "is_weekend", "is_morning_peak", "is_evening_peak", "is_midday", "bus_count"
     ]
-    # One-hot stop names
     X_m1 = pd.get_dummies(slot_agg[feature_cols_m1 + ["canonical_name"]], columns=["canonical_name"], drop_first=False)
+
     y_queue = slot_agg["total_boarded"]
 
     X_train_m1, X_test_m1, y_train_m1, y_test_m1 = train_test_split(X_m1, y_queue, test_size=0.2, random_state=42)
@@ -180,7 +160,6 @@ def main():
     print(f"  Mean Absolute Error (MAE): {mae_m1:.2f} passengers")
     print(f"  Root Mean Squared Error (RMSE): {rmse_m1:.2f} passengers")
 
-    # Generate Full Queue Predictions for all 15 stops and all 54 intervals
     queue_predictions_by_stop = {}
 
     for s_info in ROUTE4_CANONICAL_STOPS:
@@ -195,20 +174,18 @@ def main():
             dur = s["duration"]
             hr = start_m // 60
 
-            # Historical baseline for this stop and slot
             hist_match = slot_agg[(slot_agg["stop_number"] == s_num) & (slot_agg["slot_id"] == sid)]
             hist_mean = float(hist_match["total_boarded"].mean()) if len(hist_match) > 0 else 0.0
             hist_bus_avg = float(hist_match["bus_count"].mean()) if len(hist_match) > 0 else (2 if dur == 30 else 1)
             hist_per_bus = float(hist_match["avg_boarded_per_bus"].mean()) if len(hist_match) > 0 else 0.0
 
-            # Construct feature row for prediction
             row_dict = {
                 "stop_number": s_num,
                 "slot_id": sid,
                 "start_min": start_m,
                 "duration": dur,
                 "hour": hr,
-                "day_of_week": 2, # Midweek typical (Wednesday)
+                "day_of_week": 2,
                 "is_weekend": 0,
                 "is_morning_peak": int(360 <= start_m < 540),
                 "is_evening_peak": int(960 <= start_m < 1200),
@@ -219,18 +196,15 @@ def main():
                 row_dict[f"canonical_name_{candidate['name']}"] = int(candidate["name"] == s_name)
 
             row_df = pd.DataFrame([row_dict])
-            # Align columns
             for col in X_m1.columns:
                 if col not in row_df:
                     row_df[col] = 0
             row_df = row_df[X_m1.columns]
 
             pred_queue = float(rf_queue.predict(row_df)[0])
-            # Reconcile with historical mean for high fidelity
             final_queue = round(max(0, (pred_queue * 0.7 + hist_mean * 0.3)), 1)
             avg_per_bus_est = round(final_queue / max(1, hist_bus_avg), 1)
 
-            # Crowd status
             if final_queue > 40:
                 crowd_level = "High"
                 crowd_color = "#ef4444"
@@ -264,15 +238,11 @@ def main():
             "slots": stop_slots
         }
 
-    # -------------------------------------------------------------
     # MODEL 2: Recommended Number of Passengers to be Boarded
-    # -------------------------------------------------------------
     print("\n" + "="*50)
     print("TRAINING MODEL 2: Recommended Boarding Random Forest")
     print("="*50)
 
-    # Features for Boarding RF:
-    # At each stop along the trip:
     df["stop_idx_in_trip"] = df.groupby(["date", "busId"]).cumcount()
     df["hour"] = df["mins"] // 60
     df["is_morning_peak"] = (df["mins"].between(360, 540)).astype(int)
