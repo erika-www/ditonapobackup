@@ -91,6 +91,15 @@ export function hasPriorityInParty(passengerCategory, companionsList = []) {
 /**
  * Creates the canonical, fully readable JSON QR payload string
  */
+/**
+ * Creates the clean, human-readable QR payload string containing strictly the 6 requested items:
+ * 1. The trip id
+ * 2. The passenger category
+ * 3. The number of passenger in that trip id
+ * 4. Boarding stop
+ * 5. Destination stop
+ * 6. Time boarded
+ */
 export function createPassengerQrPayload({
   tripId,
   count = 1,
@@ -100,12 +109,11 @@ export function createPassengerQrPayload({
   busPlate = '',
   companions = 0,
   direction = 'Northbound',
-  companionsList = []
+  companionsList = [],
+  timeBoarded = '',
+  asJson = false
 }) {
   const now = new Date();
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const dd = String(now.getDate()).padStart(2, '0');
-  const yy = String(now.getFullYear()).slice(-2);
 
   const resolvedTripId = tripId && /^\d{6}-\d{5}$/.test(tripId)
     ? tripId
@@ -124,51 +132,35 @@ export function createPassengerQrPayload({
   const bStop = resolvedOrigin ? (resolvedOrigin.canonicalDbName || resolvedOrigin.name) : rawB;
   const dStop = resolvedDest ? (resolvedDest.canonicalDbName || resolvedDest.name) : rawD;
 
-  const cleanCompanionsList = Array.isArray(companionsList)
-    ? companionsList.map((c, i) => ({
-      name: String(c?.name || '').trim(),
-      category: String(c?.category || 'Regular').trim(),
-      isPriority: isPriorityCategory(c?.category)
-    }))
-    : [];
+  const formattedTime = timeBoarded
+    ? String(timeBoarded).trim()
+    : now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  const partyHasPriority = isPriorityCategory(category) || cleanCompanionsList.some((c) => c.isPriority);
+  if (asJson) {
+    return JSON.stringify({
+      tripId: resolvedTripId,
+      passengerCategory: category || 'Regular',
+      numberOfPassengers: totalPax,
+      boardingStop: bStop,
+      destinationStop: dStop,
+      timeBoarded: formattedTime
+    });
+  }
 
-  const payload = {
-    tripId: resolvedTripId,
-    passengerCategory: category || 'Regular',
-    category: category || 'Regular',
-    isPriority: isPriorityCategory(category),
-    hasPriorityInParty: partyHasPriority,
-    companions: companionsCount,
-    companionsList: cleanCompanionsList,
-    count: totalPax,
-    totalPassengers: totalPax,
-    direction: normalizedDirection,
-    tripDirection: normalizedDirection,
-    routeDirection: normalizedDirection,
-    boardingStop: bStop,
-    destinationStop: dStop,
-    boarding_stop: bStop,
-    destination_stop: dStop,
-    origin_name: bStop,
-    destination_name: dStop,
-    alightingStop: dStop,
-    alighting_stop: dStop,
-    fromStop: bStop,
-    toStop: dStop,
-    from: bStop,
-    to: dStop,
-    busPlate: String(busPlate || '').trim(),
-    date: `${now.getFullYear()}-${mm}-${dd}`
-  };
-
-  return JSON.stringify(payload);
+  // Strictly output the 6 requested fields formatted cleanly for phone scanning
+  return [
+    `Trip ID: ${resolvedTripId}`,
+    `Passenger Category: ${category || 'Regular'}`,
+    `Number of Passengers: ${totalPax}`,
+    `Boarding Stop: ${bStop}`,
+    `Destination Stop: ${dStop}`,
+    `Time Boarded: ${formattedTime}`
+  ].join('\n');
 }
 
 /**
  * Universal Parser for QR scanner inputs (camera scan, USB scanner, or manual text).
- * Handles JSON, pipe-delimited, key-value, and legacy strings.
+ * Handles clean 6-line text format, JSON, pipe-delimited, and standalone IDs.
  */
 export function parsePassengerQRCode(raw) {
   if (!raw) return null;
@@ -186,8 +178,13 @@ export function parsePassengerQRCode(raw) {
   );
   const getDirection = (o) => {
     const rawDir = o.direction || o.tripDirection || o.routeDirection || o.trip_direction || o.bound || '';
-    if (!rawDir) return 'Northbound';
-    return String(rawDir).trim().toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
+    if (rawDir) {
+      return String(rawDir).trim().toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
+    }
+    const b = getOrigin(o);
+    const d = getDest(o);
+    const inferred = detectPassengerDirection(b, d);
+    return inferred || 'Northbound';
   };
 
   const resolveStopsInResult = (res) => {
@@ -210,13 +207,14 @@ export function parsePassengerQRCode(raw) {
   // 0. Direct object input
   if (typeof raw === 'object' && raw !== null) {
     const tripId = raw.tripId || raw.trip_id || raw.passId || raw.id || raw.dailyTripId || raw.qr_token || raw.token || 'PASS-00001';
-    const count = Number(raw.count || raw.passengerCount || raw.passenger_count || raw.totalPassengers || raw.passengers || 1);
+    const count = Number(raw.numberOfPassengers || raw.number_of_passengers || raw.count || raw.passengerCount || raw.passenger_count || raw.totalPassengers || raw.passengers || 1);
     const companions = Number(raw.companions != null ? raw.companions : (count > 1 ? count - 1 : 0));
     const category = raw.category || raw.passengerCategory || raw.passenger_category || 'Regular';
     const boardingStop = getOrigin(raw);
     const destinationStop = getDest(raw);
     const direction = getDirection(raw);
     const companionsList = Array.isArray(raw.companionsList) ? raw.companionsList : [];
+    const timeBoarded = raw.timeBoarded || raw.time_boarded || raw.time || '';
 
     return resolveStopsInResult({
       tripId: String(tripId).trim(),
@@ -231,6 +229,7 @@ export function parsePassengerQRCode(raw) {
       routeDirection: direction,
       boardingStop,
       destinationStop,
+      timeBoarded,
       busPlate: String(raw.busPlate || raw.plateNumber || raw.bus_plate || '').trim(),
       raw: JSON.stringify(raw)
     });
@@ -249,13 +248,14 @@ export function parsePassengerQRCode(raw) {
     const data = JSON.parse(jsonStr);
     if (data && (data.tripId || data.trip_id || data.passId || data.id || data.dailyTripId || data.qr_token || data.token || getOrigin(data) || getDest(data))) {
       const tripId = data.tripId || data.trip_id || data.passId || data.id || data.dailyTripId || data.qr_token || data.token || generateDailyTripId();
-      const count = Number(data.count || data.passengerCount || data.passenger_count || data.totalPassengers || data.passengers || 1);
+      const count = Number(data.numberOfPassengers || data.number_of_passengers || data.count || data.passengerCount || data.passenger_count || data.totalPassengers || data.passengers || 1);
       const companions = Number(data.companions != null ? data.companions : (count > 1 ? count - 1 : 0));
       const category = data.category || data.passengerCategory || data.passenger_category || 'Regular';
       const boardingStop = getOrigin(data);
       const destinationStop = getDest(data);
       const direction = getDirection(data);
       const companionsList = Array.isArray(data.companionsList) ? data.companionsList : [];
+      const timeBoarded = data.timeBoarded || data.time_boarded || data.time || '';
 
       return resolveStopsInResult({
         tripId: String(tripId).trim(),
@@ -270,25 +270,36 @@ export function parsePassengerQRCode(raw) {
         routeDirection: direction,
         boardingStop,
         destinationStop,
+        timeBoarded,
         busPlate: String(data.busPlate || data.plateNumber || data.bus_plate || '').trim(),
         raw: str
       });
     }
   } catch (_) { }
 
-  // 2. Formatted Multi-line or Key-Value text
-  const tripIdMatch = str.match(/(?:Trip ID|Journey ID|Pass ID|Pass|Ticket|Code):\s*([0-9]{6}-[0-9]{5}|[A-Za-z0-9_-]+)/i);
-  const catMatch = str.match(/(?:Category|Passenger Category|Type):\s*([^\r\n,]+)/i);
+  // 2. Formatted Multi-line or Key-Value text (e.g. matching 6-field phone QR payload)
+  const tripIdMatch = str.match(/(?:Trip ID|TripId|Journey ID|Pass ID|Pass|Ticket|Code):\s*([0-9]{6}-[0-9]{5}|[A-Za-z0-9_-]+)/i);
+  const catMatch = str.match(/(?:Passenger Category|Category|Type):\s*([^\r\n,]+)/i);
+  const countMatch = str.match(/(?:Number of Passengers|Number of Passenger|Passenger Count|Passengers|Count|Pax|Seats|Qty):\s*([0-9]+)/i);
   const boardMatch = str.match(/(?:Boarding Stop|Boarding|Origin|From|Pickup|Start Stop|Start):\s*([^\r\n,]+)/i);
   const destMatch = str.match(/(?:Destination Stop|Destination|Alighting Stop|Alighting|Dropoff|To|End Stop|End):\s*([^\r\n,]+)/i);
-  const countMatch = str.match(/(?:Count|Passengers|Pax|Seats|Qty):\s*([0-9]+)/i);
+  const timeMatch = str.match(/(?:Time Boarded|Time|Boarded At|Boarding Time):\s*([^\r\n,]+)/i);
   const busMatch = str.match(/(?:Assigned Bus|Bus Plate|Bus|Unit):\s*([^\r\n,]+)/i);
   const dirMatch = str.match(/(?:Direction|Heading|Bound):\s*([^\r\n,]+)/i);
 
   if (tripIdMatch || boardMatch || destMatch) {
     const category = catMatch ? catMatch[1].trim() : 'Regular';
     const count = countMatch ? Number.parseInt(countMatch[1], 10) : 1;
-    const direction = dirMatch && dirMatch[1].toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
+    const boardingStop = boardMatch ? extractStopName(boardMatch[1]) : '';
+    const destinationStop = destMatch ? extractStopName(destMatch[1]) : '';
+    let direction = 'Northbound';
+    if (dirMatch && dirMatch[1].toLowerCase().includes('south')) {
+      direction = 'Southbound';
+    } else {
+      const inferred = detectPassengerDirection(boardingStop, destinationStop);
+      if (inferred) direction = inferred;
+    }
+
     return resolveStopsInResult({
       tripId: tripIdMatch ? tripIdMatch[1].trim() : (str.match(/\b([0-9]{6}-[0-9]{5})\b/)?.[1] || generateDailyTripId()),
       count: isNaN(count) || count < 1 ? 1 : count,
@@ -300,8 +311,9 @@ export function parsePassengerQRCode(raw) {
       direction,
       tripDirection: direction,
       routeDirection: direction,
-      boardingStop: boardMatch ? extractStopName(boardMatch[1]) : '',
-      destinationStop: destMatch ? extractStopName(destMatch[1]) : '',
+      boardingStop,
+      destinationStop,
+      timeBoarded: timeMatch ? timeMatch[1].trim() : '',
       busPlate: busMatch ? busMatch[1].trim() : '',
       raw: str
     });
@@ -318,7 +330,9 @@ export function parsePassengerQRCode(raw) {
       const boardingStop = extractStopName(parts[idIdx + 3]) || '';
       const destinationStop = extractStopName(parts[idIdx + 4]) || '';
       const rawDir = parts[idIdx + 5] || '';
-      const direction = rawDir.toLowerCase().includes('south') ? 'Southbound' : 'Northbound';
+      const direction = rawDir.toLowerCase().includes('south')
+        ? 'Southbound'
+        : (detectPassengerDirection(boardingStop, destinationStop) || 'Northbound');
       return resolveStopsInResult({
         tripId,
         count: isNaN(count) || count < 1 ? 1 : count,
@@ -332,6 +346,7 @@ export function parsePassengerQRCode(raw) {
         routeDirection: direction,
         boardingStop,
         destinationStop,
+        timeBoarded: '',
         busPlate: '',
         raw: str
       });
@@ -354,6 +369,7 @@ export function parsePassengerQRCode(raw) {
       routeDirection: 'Northbound',
       boardingStop: '',
       destinationStop: '',
+      timeBoarded: '',
       busPlate: '',
       raw: str
     });
@@ -372,6 +388,7 @@ export function parsePassengerQRCode(raw) {
     routeDirection: 'Northbound',
     boardingStop: '',
     destinationStop: '',
+    timeBoarded: '',
     busPlate: '',
     raw: str
   });

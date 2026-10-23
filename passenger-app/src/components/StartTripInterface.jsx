@@ -699,6 +699,7 @@ export function StartTripInterface({
             const travelMins = 20;
             const category = activeItem.passenger_category || currentUser?.category || 'Regular';
             const restoredTripId = activeItem.qr_token || generateDailyTripId();
+            const restoredStartTime = activeItem.created_at ? new Date(activeItem.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const qrData = createPassengerQrPayload({
               tripId: restoredTripId,
               count: activeItem.passenger_count || 1,
@@ -707,7 +708,8 @@ export function StartTripInterface({
               boardingStop: activeItem.origin_name,
               destinationStop: activeItem.destination_name,
               busPlate: activeItem.trips?.buses?.plate_number || '',
-              direction: activeItem.route_direction || 'Northbound'
+              direction: activeItem.route_direction || 'Northbound',
+              timeBoarded: restoredStartTime
             });
 
             setActiveTrip({
@@ -725,7 +727,7 @@ export function StartTripInterface({
               qrData,
               dailyTripId: restoredTripId,
               category,
-              startTime: activeItem.created_at ? new Date(activeItem.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              startTime: restoredStartTime,
               estMinutes: travelMins,
               distanceKm: '2.5',
               busEta: `~${travelMins} mins`
@@ -820,6 +822,59 @@ export function StartTripInterface({
       clearInterval(livePoller);
     };
   }, [routeBusTrip?.id, routeBusTrip?.bus_id]);
+
+  // Realtime Live Bus Occupancy & Available Seats Listener (BroadcastChannel, storage event, shared cookie)
+  useEffect(() => {
+    let bc = null;
+    if (typeof window !== 'undefined' && window.BroadcastChannel) {
+      try {
+        bc = new BroadcastChannel('qcbus_live_channel');
+        bc.onmessage = (event) => {
+          const msg = event.data;
+          if (msg?.type === 'OCCUPANCY_UPDATED' && msg.payload) {
+            setOccupancy(msg.payload);
+          } else if (msg?.type === 'PASSENGER_BOARDED' || msg?.type === 'PASSENGER_ALIGHTED' || msg?.type === 'PASSENGERS_ALIGHTED_AT_STOP') {
+            const tripId = routeBusTrip?.id || '00000000-0000-0000-0000-000000000001';
+            fetchTripOccupancy(tripId).then((res) => {
+              if (res.success && res.data) setOccupancy(res.data);
+            });
+          }
+        };
+      } catch (_) {}
+    }
+
+    const handleStorage = (e) => {
+      if (e.key === 'qcbus_live_occupancy' && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (parsed && parsed.current_onboard != null) {
+            setOccupancy(parsed);
+          }
+        } catch (_) {}
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+
+    // Initial check from shared cookie or localStorage for zero-latency localhost cross-port sync
+    try {
+      const match = document.cookie.match(/(?:^|;\s*)qcbus_live_occupancy=([^;]+)/);
+      if (match) {
+        const parsed = JSON.parse(decodeURIComponent(match[1]));
+        if (parsed && parsed.current_onboard != null) setOccupancy(parsed);
+      } else {
+        const local = localStorage.getItem('qcbus_live_occupancy');
+        if (local) {
+          const parsed = JSON.parse(local);
+          if (parsed && parsed.current_onboard != null) setOccupancy(parsed);
+        }
+      }
+    } catch (_) {}
+
+    return () => {
+      if (bc) bc.close();
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, [routeBusTrip?.id]);
 
   useEffect(() => {
     if ((activeTab !== 'tracking' && !activeTrip) || !liveBusCoords?.updated_at) return undefined;
@@ -1044,7 +1099,9 @@ export function StartTripInterface({
       const originName = startStop.canonicalDbName || startStop.name;
       const destName = endStop.canonicalDbName || endStop.name;
 
-      // Standard scannable JSON QR payload matching selected details
+      const tripStartTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      // Clean, standard 6-field scannable QR payload matching user request
       const qrPayloadString = createPassengerQrPayload({
         tripId: dailyTripId,
         count: totalPassengerCount,
@@ -1054,7 +1111,8 @@ export function StartTripInterface({
         destinationStop: destName,
         busPlate: bus.plateNumber,
         direction,
-        companionsList: cleanCompanionsList
+        companionsList: cleanCompanionsList,
+        timeBoarded: tripStartTime
       });
 
       // Save journey to Supabase passenger_journeys table
@@ -1098,7 +1156,7 @@ export function StartTripInterface({
         isQrScanned: false,
         qrData: qrPayloadString,
         dailyTripId,
-        startTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        startTime: tripStartTime,
         estMinutes: travelMins,
         distanceKm: googleEta?.distanceKm || '2.5',
         busEta: `~${travelMins} mins`,
@@ -1142,7 +1200,8 @@ export function StartTripInterface({
         activeTrip.estMinutes,
         activeTrip.busEta,
         activeTrip.category || currentUser?.category || 'Regular',
-        activeTrip.id
+        activeTrip.id,
+        activeTrip.startTime
       );
     }
   }, [step, activeTrip, activeTab, routeBusTrip]);
@@ -1462,6 +1521,11 @@ export function StartTripInterface({
                       <div style={{ color: '#334155' }}>
                         To: {activeTrip.toStop?.name || activeTrip.toStop}
                       </div>
+                      {activeTrip.startTime && (
+                        <div style={{ color: '#334155' }}>
+                          Time Boarded: {activeTrip.startTime}
+                        </div>
+                      )}
                       {activeTrip.direction && (
                         <div style={{ color: '#334155', fontWeight: 600 }}>
                           Direction: {activeTrip.direction}

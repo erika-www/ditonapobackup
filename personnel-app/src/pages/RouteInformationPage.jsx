@@ -382,13 +382,13 @@ export function RouteInformationPage() {
   const priorityBoarded = passengerRegistry.filter((journey) => journey.status === 'boarded' && isJourneyMatchingDirection(journey, direction)).reduce((acc, curr) => {
     if (curr.priority_count != null) return acc + Number(curr.priority_count);
     const isPri = isPriorityCategory(curr.passenger_category || curr.profiles?.passenger_category || curr.category);
-    return acc + (isPri ? (Number(curr.count) || 1) : 0);
+    return acc + (isPri ? (Number(curr.count ?? curr.passenger_count ?? 1) || 1) : 0);
   }, 0);
 
   const regularBoarded = passengerRegistry.filter((journey) => journey.status === 'boarded' && isJourneyMatchingDirection(journey, direction)).reduce((acc, curr) => {
     if (curr.regular_count != null) return acc + Number(curr.regular_count);
     const isPri = isPriorityCategory(curr.passenger_category || curr.profiles?.passenger_category || curr.category);
-    return acc + (!isPri ? (Number(curr.count) || 1) : 0);
+    return acc + (!isPri ? (Number(curr.count ?? curr.passenger_count ?? 1) || 1) : 0);
   }, 0);
 
   const busCapacity = Number(dutySession?.busCapacity) || 50;
@@ -398,26 +398,63 @@ export function RouteInformationPage() {
   const availableRegularSeats = Math.max(0, regularSeatCapacity - regularBoarded);
   const totalOnboard = priorityBoarded + regularBoarded;
 
+  // Centralized Live Occupancy Sync to localStorage, shared cookie, and BroadcastChannel
+  useEffect(() => {
+    try {
+      const plate = dutySession?.plateNumber || 'QC-BUS-0402';
+      const effectiveTripId = operationalTripId || dutySession?.tripId || '00000000-0000-0000-0000-000000000001';
+      const liveOcc = {
+        bus_plate: plate,
+        trip_id: effectiveTripId,
+        direction,
+        current_onboard: totalOnboard,
+        bus_capacity: busCapacity,
+        available_seats: Math.max(0, busCapacity - totalOnboard),
+        priority_boarded: priorityBoarded,
+        regular_boarded: regularBoarded,
+        available_priority_seats: availablePrioritySeats,
+        available_regular_seats: availableRegularSeats,
+        updated_at: new Date().toISOString()
+      };
+
+      // 1. localStorage for same-origin tabs
+      localStorage.setItem('qcbus_live_occupancy', JSON.stringify(liveOcc));
+
+      // 2. Document cookie for cross-port localhost sync (passenger-app:5173 <-> personnel-app:5174)
+      document.cookie = `qcbus_live_occupancy=${encodeURIComponent(JSON.stringify(liveOcc))}; path=/; max-age=86400`;
+
+      // 3. BroadcastChannel for instant local IPC
+      if (typeof window !== 'undefined' && window.BroadcastChannel) {
+        const bc = new BroadcastChannel('qcbus_live_channel');
+        bc.postMessage({
+          type: 'OCCUPANCY_UPDATED',
+          payload: liveOcc
+        });
+        bc.close();
+      }
+    } catch (_) {}
+  }, [passengerRegistry, direction, totalOnboard, busCapacity, priorityBoarded, regularBoarded, availablePrioritySeats, availableRegularSeats, operationalTripId, dutySession?.plateNumber, dutySession?.tripId]);
+
   // Boarded & Alighting counters per stop using canonical stop resolution (direction-isolated)
   const passengersBoardedAt = (stopName) => {
     return passengerRegistry.filter((journey) => {
       const isBoardedOrDone = journey.status === 'boarded' || journey.status === 'completed';
       return isBoardedOrDone && isJourneyMatchingDirection(journey, direction) && isSameStop(journey.origin_name, stopName);
-    }).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
+    }).reduce((acc, curr) => acc + (Number(curr.count ?? curr.passenger_count ?? 1) || 1), 0);
   };
 
   const passengersAlightingAt = (stopName) => {
     return passengerRegistry.filter((journey) => {
       const isCurrentlyBoarded = journey.status === 'boarded';
       return isCurrentlyBoarded && isJourneyMatchingDirection(journey, direction) && isSameStop(journey.destination_name, stopName);
-    }).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
+    }).reduce((acc, curr) => acc + (Number(curr.count ?? curr.passenger_count ?? 1) || 1), 0);
   };
 
   const passengersCompletedAlightedAt = (stopName) => {
     return passengerRegistry.filter((journey) => {
       const isCompleted = journey.status === 'completed';
       return isCompleted && isJourneyMatchingDirection(journey, direction) && isSameStop(journey.destination_name, stopName);
-    }).reduce((acc, curr) => acc + (Number(curr.count) || 1), 0);
+    }).reduce((acc, curr) => acc + (Number(curr.count ?? curr.passenger_count ?? 1) || 1), 0);
   };
 
   // Match GPS fixes against every stop so missed or out-of-order arrivals can recover.
@@ -1358,15 +1395,80 @@ export function RouteInformationPage() {
     const onboardJourneys = passengerRegistry.filter((j) => j.status === 'boarded' && isJourneyMatchingDirection(j, direction));
     if (onboardJourneys.length === 0) return;
 
-    const totalPax = onboardJourneys.reduce((sum, j) => sum + (Number(j.count) || 1), 0);
+    const totalPax = onboardJourneys.reduce((sum, j) => sum + (Number(j.count ?? j.passenger_count ?? 1) || 1), 0);
 
     setPassengerRegistry((prev) => {
-      const next = prev.map((j) => (j.status === 'boarded' && isJourneyMatchingDirection(j, direction)) ? { ...j, status: 'completed', alighted_at: now } : j);
+      const next = prev.map((j) => (j.status === 'boarded' && isJourneyMatchingDirection(j, direction)) ? { ...j, status: 'completed', alighted_at: now, updated_at: now } : j);
       saveAndSyncRegistry(next);
       return next;
     });
 
-    setStatusMessage(`All ${totalPax} remaining passengers alighted at ${currentStop.name}. Trip complete.`);
+    // Sync to individual passenger localStorage & cookie
+    try {
+      onboardJourneys.forEach((j) => {
+        const token = j.qr_token || j.id;
+        if (token) {
+          localStorage.setItem(`qcbus_scanned_${token}`, JSON.stringify({ status: 'completed', alighted_at: now, destination: currentStop.name }));
+          document.cookie = `qcbus_scan_${token}=${encodeURIComponent(JSON.stringify({ status: 'completed', stop: currentStop.name, time: Date.now() }))}; path=/; max-age=86400`;
+        }
+        if (j.id && j.id !== token) {
+          localStorage.setItem(`qcbus_scanned_${j.id}`, JSON.stringify({ status: 'completed', alighted_at: now, destination: currentStop.name }));
+        }
+      });
+
+      if (typeof window !== 'undefined' && window.BroadcastChannel) {
+        const bc = new BroadcastChannel('qcbus_live_channel');
+        bc.postMessage({
+          type: 'PASSENGERS_ALIGHTED_AT_STOP',
+          payload: {
+            stopName: currentStop.name,
+            stopIndex: currentStopIndex,
+            completedJourneys: onboardJourneys.map(j => ({ id: j.id, qr_token: j.qr_token, count: j.count }))
+          }
+        });
+        bc.close();
+      }
+    } catch (_) {}
+
+    // Background update to Supabase
+    let activeTripId = operationalTripId || dutySession?.tripId || null;
+    onboardJourneys.forEach(async (j) => {
+      const token = j.qr_token || j.id;
+      try {
+        if (j.id && !String(j.id).startsWith('manual-')) {
+          supabase.from('passenger_journeys').update({
+            status: 'completed',
+            alighted_at: now,
+            updated_at: now
+          }).eq('id', j.id).then(({ error: updErr }) => {
+            if (updErr && token) {
+              supabase.from('passenger_journeys').update({
+                status: 'completed',
+                alighted_at: now,
+                updated_at: now
+              }).eq('qr_token', token).catch(() => {});
+            }
+          }).catch(() => {});
+        } else if (token) {
+          supabase.from('passenger_journeys').update({
+            status: 'completed',
+            alighted_at: now,
+            updated_at: now
+          }).eq('qr_token', token).catch(() => {});
+        }
+        if (activeTripId) {
+          recordBoardingEvent({
+            tripId: activeTripId,
+            eventType: 'alight',
+            method: 'terminal_alight_all',
+            journeyId: j.id,
+            idempotencyKey: `alight-all-${j.id || token}-${Date.now()}`
+          }).catch(() => {});
+        }
+      } catch (_) {}
+    });
+
+    setStatusMessage(`All ${totalPax} remaining passengers alighted at ${currentStop.name}. All seats restored and trip completed.`);
   };
 
   const handleManualRegistration = async (event) => {
@@ -1865,20 +1967,20 @@ export function RouteInformationPage() {
                 </div>
 
                 <div>
-                  {/* BOARDED & ALIGHTING COUNTERS */}
+                  {/* BOARDED & DESTINATION / ALIGHTING COUNTERS */}
                   <div style={{ display: 'flex', gap: '.3rem', marginTop: '.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
                     {boardedCount > 0 && (
-                      <span style={{ padding: '.12rem .35rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,.15)', border: '1px solid #10b981', color: '#10b981', fontSize: '.68rem', fontWeight: 700 }}>
+                      <span style={{ padding: '.12rem .35rem', borderRadius: 'var(--radius-sm)', background: 'rgba(16,185,129,.15)', border: '1px solid #10b981', color: '#10b981', fontSize: '.68rem', fontWeight: 700 }} title="Passengers boarded at this starting stop">
                         Boarded: {boardedCount}
                       </span>
                     )}
                     {alightingCount > 0 && (
-                      <span style={{ padding: '.12rem .35rem', borderRadius: 'var(--radius-sm)', background: 'rgba(239,68,68,.15)', border: '1px solid #ef4444', color: '#ef4444', fontSize: '.68rem', fontWeight: 700 }}>
-                        Alighting: {alightingCount}
+                      <span style={{ padding: '.12rem .35rem', borderRadius: 'var(--radius-sm)', background: 'rgba(239,68,68,.15)', border: '1px solid #ef4444', color: '#ef4444', fontSize: '.68rem', fontWeight: 700 }} title="Passengers heading to this destination stop">
+                        Destination: {alightingCount}
                       </span>
                     )}
                     {completedAlightedCount > 0 && (
-                      <span style={{ padding: '.12rem .35rem', borderRadius: 'var(--radius-sm)', background: 'rgba(148,163,184,.15)', border: '1px solid #64748b', color: '#94a3b8', fontSize: '.68rem', fontWeight: 600 }}>
+                      <span style={{ padding: '.12rem .35rem', borderRadius: 'var(--radius-sm)', background: 'rgba(148,163,184,.15)', border: '1px solid #64748b', color: '#94a3b8', fontSize: '.68rem', fontWeight: 600 }} title="Passengers arrived and alighted here">
                         Alighted: {completedAlightedCount}
                       </span>
                     )}

@@ -494,11 +494,24 @@ export async function fetchTripOccupancy(tripId) {
   try {
     let occupancyData = null;
 
-    // 0. Check localStorage live occupancy first for zero-latency sync across local apps
-    if (typeof window !== 'undefined' && window.localStorage) {
+    // 0. Check shared cookie first for cross-port localhost sync (5173 <-> 5174)
+    if (typeof document !== 'undefined') {
+      try {
+        const match = document.cookie.match(/(?:^|;\s*)qcbus_live_occupancy=([^;]+)/);
+        if (match) {
+          const cookieOcc = JSON.parse(decodeURIComponent(match[1]));
+          if (cookieOcc && cookieOcc.current_onboard != null) {
+            occupancyData = { ...cookieOcc };
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Check localStorage live occupancy if cookie was not available
+    if (!occupancyData && typeof window !== 'undefined' && window.localStorage) {
       try {
         const localLive = JSON.parse(localStorage.getItem('qcbus_live_occupancy') || 'null');
-        if (localLive) {
+        if (localLive && localLive.current_onboard != null) {
           occupancyData = { ...localLive };
         }
       } catch (_) {}
@@ -515,21 +528,22 @@ export async function fetchTripOccupancy(tripId) {
     } catch (_) {}
 
     // 2. Fetch boarded passengers from passenger_journeys to calculate priority vs regular seat counts
-    let priorityBoarded = occupancyData?.priority_boarded != null ? Number(occupancyData.priority_boarded) : 0;
-    let regularBoarded = occupancyData?.regular_boarded != null ? Number(occupancyData.regular_boarded) : 0;
+    let dbQuerySucceeded = false;
+    let dbPri = 0;
+    let dbReg = 0;
     try {
       let query = supabase.from('passenger_journeys')
-        .select('passenger_category,passenger_count,status')
+        .select('passenger_category,passenger_count,status,trip_id')
         .eq('status', 'boarded');
 
-      if (tripId && tripId !== 'active-trip') {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(tripId || ''));
+      if (isUuid) {
         query = query.eq('trip_id', tripId);
       }
 
-      const { data: journeys } = await query;
-      if (journeys && journeys.length > 0) {
-        let dbPri = 0;
-        let dbReg = 0;
+      const { data: journeys, error: jErr } = await query;
+      if (!jErr && Array.isArray(journeys)) {
+        dbQuerySucceeded = true;
         for (const j of journeys) {
           const count = Math.max(1, Number(j.passenger_count) || 1);
           if (isPriorityCategory(j.passenger_category)) {
@@ -538,14 +552,20 @@ export async function fetchTripOccupancy(tripId) {
             dbReg += count;
           }
         }
-        priorityBoarded = Math.max(priorityBoarded, dbPri);
-        regularBoarded = Math.max(regularBoarded, dbReg);
       }
     } catch (_) {}
 
-    const totalBoarded = priorityBoarded + regularBoarded;
+    const priorityBoarded = occupancyData?.priority_boarded != null
+      ? Number(occupancyData.priority_boarded)
+      : (dbQuerySucceeded ? dbPri : 0);
+    const regularBoarded = occupancyData?.regular_boarded != null
+      ? Number(occupancyData.regular_boarded)
+      : (dbQuerySucceeded ? dbReg : 0);
+
     const busCapacity = Number(occupancyData?.bus_capacity) || 50;
-    const currentOnboard = occupancyData?.current_onboard != null ? Number(occupancyData.current_onboard) : totalBoarded;
+    const currentOnboard = occupancyData?.current_onboard != null
+      ? Number(occupancyData.current_onboard)
+      : (priorityBoarded + regularBoarded);
     const availableSeats = Math.max(0, busCapacity - currentOnboard);
     const availablePrioritySeats = Math.max(0, 20 - priorityBoarded);
     const availableRegularSeats = Math.max(0, 30 - regularBoarded);
@@ -565,7 +585,19 @@ export async function fetchTripOccupancy(tripId) {
       }
     };
   } catch (err) {
-    return { success: false, error: err.message };
+    return {
+      success: false,
+      error: err.message,
+      data: {
+        bus_capacity: 50,
+        current_onboard: 0,
+        available_seats: 50,
+        priority_boarded: 0,
+        regular_boarded: 0,
+        available_priority_seats: 20,
+        available_regular_seats: 30
+      }
+    };
   }
 }
 
@@ -710,6 +742,39 @@ export function subscribeToBusLocation(busId, onUpdate) {
 }
 
 export function subscribeToTripOccupancy(tripId, onUpdate) {
+  if (!onUpdate) return () => {};
+
+  // 1. BroadcastChannel for instant local cross-app updates (zero latency)
+  let bc = null;
+  if (typeof window !== 'undefined' && window.BroadcastChannel) {
+    try {
+      bc = new BroadcastChannel('qcbus_live_channel');
+      bc.onmessage = (event) => {
+        if (event.data?.type === 'OCCUPANCY_UPDATED' && event.data.payload) {
+          onUpdate(event.data.payload);
+        } else if (event.data?.type === 'PASSENGER_BOARDED' || event.data?.type === 'PASSENGER_ALIGHTED' || event.data?.type === 'PASSENGERS_ALIGHTED_AT_STOP') {
+          fetchTripOccupancy(tripId).then((res) => {
+            if (res.success && res.data) onUpdate(res.data);
+          });
+        }
+      };
+    } catch (_) {}
+  }
+
+  // 2. Storage event listener for cross-tab sync
+  const handleStorage = (e) => {
+    if (e.key === 'qcbus_live_occupancy' && e.newValue) {
+      try {
+        const parsed = JSON.parse(e.newValue);
+        if (parsed) onUpdate(parsed);
+      } catch (_) {}
+    }
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', handleStorage);
+  }
+
+  // 3. Supabase Realtime Channel
   const channelId = `trip_occupancy_${tripId || 'all'}_${Date.now()}`;
   const channel = supabase
     .channel(channelId)
@@ -744,6 +809,10 @@ export function subscribeToTripOccupancy(tripId, onUpdate) {
     .subscribe();
 
   return () => {
+    if (bc) bc.close();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('storage', handleStorage);
+    }
     supabase.removeChannel(channel);
   };
 }

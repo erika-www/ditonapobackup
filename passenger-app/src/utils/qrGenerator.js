@@ -23,7 +23,8 @@ export async function drawQRCodeCanvas(
   estMinutes,
   busEta,
   category = 'Regular',
-  passId = null
+  passId = null,
+  timeBoarded = null
 ) {
   if (!canvas) return;
 
@@ -31,8 +32,8 @@ export async function drawQRCodeCanvas(
   const totalPax = 1 + companions;
   const resolvedTripId = passId || (typeof dataString === 'string' && /^\d{6}-\d{5}$/.test(dataString) ? dataString : (dataString ? dataString.slice(0, 16) : 'PASS-00001'));
 
-  // Build the clean, standardized JSON QR payload that any scanner can parse
-  const qrPayload = (typeof dataString === 'string' && dataString.trim().startsWith('{'))
+  // If a ready string payload is passed (e.g. 6-field phone QR payload), use it directly
+  const qrPayload = (typeof dataString === 'string' && dataString.trim().length > 0)
     ? dataString
     : createPassengerQrPayload({
         tripId: resolvedTripId,
@@ -41,7 +42,8 @@ export async function drawQRCodeCanvas(
         category: category || 'Regular',
         boardingStop: fromStop,
         destinationStop: toStop,
-        busPlate: busPlate || 'QC-BUS'
+        busPlate: busPlate || 'QC-BUS',
+        timeBoarded
       });
 
   try {
